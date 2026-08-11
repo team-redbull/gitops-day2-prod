@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ .Values.group }}-in-cluster
+  namespace: gitops-{{ .Values.group }}
+spec:
+  project: '{{ .Values.group }}'
+  sources:
+    - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/argocd-day2-platform.git'
+      targetRevision: main
+      path: operators
+      helm:
+        ignoreMissingValueFiles: true
+        values: |
+          group: '{{ .Values.group }}'
+          mce: {{ .Values.mce }}
+          cluster: 'in-cluster'
+  destination:
+    name: in-cluster
+    namespace: gitops-{{ .Values.group }}
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true

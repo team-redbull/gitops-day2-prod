@@ -25,8 +25,8 @@ spec:
           - '$values/mces/{{ .Values.mce }}/values.yaml'
           - '$values/mces/{{ .Values.mce }}/{{ .Values.cluster }}/values.yaml'
           {{- if eq .Values.cluster "in-cluster" }}
-          - '$values/mces/in-cluster-defaults/charts/{{ .Values.operator }}/values.yaml'
-          - '$values/mces/in-cluster-defaults/charts/{{ .Values.operator }}/values-{{ .Values.mce }}.yaml'
+          - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values.yaml'
+          - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values-{{ .Values.mce }}.yaml'
           {{- end }}
           - '$values/mces/{{ .Values.mce }}/{{ .Values.cluster }}/{{ .Values.operator }}/values.yaml'
     - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'

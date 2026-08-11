@@ -10,6 +10,8 @@ spec:
         revision: main
         directories:
           - path: "mces/{{ .Values.mce }}/*"
+          - path: "mces/{{ .Values.mce }}/in-cluster"
+            exclude: true
   template:
     metadata:
       name: '{{ .Values.group }}-{{ "{{" }}path.basename{{ "}}" }}'
