@@ -1,8 +1,8 @@
 # mces/in-cluster-defaults
 
-Charts under `charts/` are deployed to the **in-cluster** (the MCE hub itself) of
-**every MCE** of this team (redbull). Add a chart folder here once instead of
-duplicating it under `mces/<mce>/in-cluster/` for each MCE.
+Chart folders in this directory are deployed to the **in-cluster** (the MCE hub
+itself) of **every MCE** of this team (redbull). Add a chart folder here once
+instead of duplicating it under `mces/<mce>/in-cluster/` for each MCE.
 
 Naming convention in this repo: a folder's name is the destination as seen by the
 Argo that consumes it. `mces/<mce>/in-cluster/` = the MCE hub (from the MCE's
@@ -18,11 +18,10 @@ per-MCE value overrides next to the base values:
 ```
 mces/
   in-cluster-defaults/
-    charts/
-      <chart>/
-        <chart>.yaml         # deploy config (repoUrl, projectNamespace, syncPolicy, ...)
-        values.yaml          # helm values applied on every MCE's in-cluster
-        values-<mce>.yaml    # optional: value overrides for one specific MCE
+    <chart>/
+      <chart>.yaml         # deploy config (repoUrl, projectNamespace, syncPolicy, ...)
+      values.yaml          # helm values applied on every MCE's in-cluster
+      values-<mce>.yaml    # optional: value overrides for one specific MCE
 ```
 
 ## Rules
@@ -39,6 +38,11 @@ mces/
    excludes `mces/in-cluster-defaults`. Any future ApplicationSet or tooling that
    scans `mces/*` MUST replicate that exclude, or it will treat this folder as a
    cluster.
+4. **Every directory directly under this folder becomes an Application.** The
+   generator scans `mces/in-cluster-defaults/*` with no intermediate `charts/`
+   level, so never create non-chart directories here (docs, scripts, ...) — they
+   would be generated as broken apps on every MCE hub. Plain files (like this
+   README) are ignored by the directory generator and are safe.
 
 ## How it is wired
 
@@ -46,10 +50,16 @@ In `argocd-day2-platform`:
 
 - `mces/templates/mcesAppset.yaml` — `exclude: true` entry for
   `mces/in-cluster-defaults` so this folder is not treated as an MCE.
+- `clusters/templates/inClusterApp.yaml` — the in-cluster Application is
+  **statically rendered** per MCE (not folder-discovered), so defaults reach
+  every MCE hub even when the MCE has no `mces/<mce>/in-cluster/` folder.
+  `clusters/templates/clustersAppset.yaml` excludes `mces/<mce>/in-cluster` from
+  its generator so the appset and the static template never both produce the
+  same Application name.
 - `operators/templates/operators.yaml` — guarded by `cluster == in-cluster`: a
-  second git directories generator over `mces/in-cluster-defaults/charts/*` in
-  the team repo, plus a config valueFiles layer
-  `$values/mces/in-cluster-defaults/charts/<chart>/<chart>.yaml`.
+  second git directories generator over `mces/in-cluster-defaults/*` in the team
+  repo, plus a config valueFiles layer
+  `$values/mces/in-cluster-defaults/<chart>/<chart>.yaml`.
 - `deploy/templates/deployApp.yaml` — guarded by `cluster == in-cluster`: two
   extra value layers (see precedence).
 
@@ -63,8 +73,8 @@ locations is an in-place no-op update, never a delete/recreate.
 1. `operators/<chart>/values.yaml` — chart, team-wide
 2. `mces/<mce>/values.yaml` — MCE-wide
 3. `mces/<mce>/in-cluster/values.yaml` — cluster-wide
-4. `mces/in-cluster-defaults/charts/<chart>/values.yaml` — chart, every MCE in-cluster
-5. `mces/in-cluster-defaults/charts/<chart>/values-<mce>.yaml` — chart + specific MCE
+4. `mces/in-cluster-defaults/<chart>/values.yaml` — chart, every MCE in-cluster
+5. `mces/in-cluster-defaults/<chart>/values-<mce>.yaml` — chart + specific MCE
 6. `mces/<mce>/in-cluster/<chart>/values.yaml` — per-MCE charts only (XOR rule)
 
 The defaults layers (4–5) sit **after** the MCE/cluster-wide files — the same
@@ -73,7 +83,7 @@ already beats the MCE/cluster-wide files). So migrating a chart does not change
 how any colliding key resolves.
 
 Deploy config precedence: `operators/<chart>/<chart>.yaml` →
-`mces/in-cluster-defaults/charts/<chart>/<chart>.yaml` →
+`mces/in-cluster-defaults/<chart>/<chart>.yaml` →
 `mces/<mce>/in-cluster/<chart>/<chart>.yaml` (last one for per-MCE charts only).
 Defaults charts share one deploy config across all MCEs; if a chart needs
 different config (not values) per MCE, keep it per-MCE instead.
@@ -88,11 +98,12 @@ different config (not values) per MCE, keep it per-MCE instead.
    apps (byte-identical render) and spec-only for in-cluster apps (extra
    valueFiles entries pointing at not-yet-existing files,
    `ignoreMissingValueFiles: true`) — rendered workload manifests unchanged.
-2. Team: add a **new** chart under `charts/` → new Applications only.
+2. Team: add a **new** chart folder here → new Applications only.
 3. Migrate an existing duplicated chart, one chart per commit: **move** its
-   folder from every `mces/<mce>/in-cluster/<chart>/` into `charts/<chart>/` in a
-   single commit. If per-MCE values differed, put the common part in
-   `values.yaml` and the diffs in `values-<mce>.yaml`.
+   folder from every `mces/<mce>/in-cluster/<chart>/` into
+   `in-cluster-defaults/<chart>/` in a single commit. If per-MCE values
+   differed, put the common part in `values.yaml` and the diffs in
+   `values-<mce>.yaml`.
 
    **Verify BEFORE merging, not after** — the apps run `selfHeal: true`, so a
    wrong resolution syncs to prod immediately; there is no post-merge inspection
@@ -105,3 +116,17 @@ different config (not values) per MCE, keep it per-MCE instead.
 Verified against Argo CD 3.1.11: rendered old-vs-new `helm template` diffs are
 byte-identical for hosted clusters, additive-only (missing-file-tolerant
 valueFiles) for in-cluster; the mcesAppset diff is the exclude entry only.
+
+## Change 2026-08-11 (not yet live-verified)
+
+- The `charts/` level was removed: chart folders sit directly under
+  `mces/in-cluster-defaults/` (rule 4 above is the consequence).
+- The in-cluster Application moved from appset-discovered to statically
+  rendered (`clusters/templates/inClusterApp.yaml` + generator exclude).
+  Rollout note: on the platform push, each MCE's appset deletes its generated
+  `<group>-in-cluster` app (cascading through the CR subtree) and the static
+  one rebuilds it — deployed workloads are untouched (deploy apps carry no
+  resources finalizer), but expect a few minutes of Argo CR churn per MCE
+  unless the finalizer is stripped from `<group>-in-cluster` beforehand.
+- Helm-render verified locally (all charts, in-cluster + spoke cases);
+  re-verify against live Argo before relying on this section's guarantees.
