@@ -1,0 +1,45 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  {{- if .Values.appname }}
+  name: {{ .Values.appname }}
+  {{- else }}
+  name: {{ .Values.group }}-{{ .Values.cluster }}-{{ .Values.operator }}-deploy
+  {{- end }}
+  namespace: gitops-{{ .Values.group }}
+spec:
+  project: '{{ .Values.group }}'
+  sources:
+    - repoURL: '{{ .Values.repourl }}'
+      targetRevision: '{{ .Values.targetRevision | default "HEAD" }}'
+      path: {{ .Values.path | default "." }}
+      helm:
+        {{- if .Values.oldConvention }}
+        releaseName: {{ .Values.cluster }}-{{ .Values.group }}-{{ .Values.operator }}
+        {{- else }}
+        releaseName: {{ .Values.operator }}
+        {{- end }}
+        ignoreMissingValueFiles: true
+        valueFiles:
+          - '$values/operators/{{ .Values.operator }}/values.yaml'
+          - '$values/mces/{{ .Values.mce }}/values.yaml'
+          - '$values/mces/{{ .Values.mce }}/{{ .Values.cluster }}/values.yaml'
+          {{- if eq .Values.cluster "in-cluster" }}
+          - '$values/mces/in-cluster-defaults/charts/{{ .Values.operator }}/values.yaml'
+          - '$values/mces/in-cluster-defaults/charts/{{ .Values.operator }}/values-{{ .Values.mce }}.yaml'
+          {{- end }}
+          - '$values/mces/{{ .Values.mce }}/{{ .Values.cluster }}/{{ .Values.operator }}/values.yaml'
+    - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+      targetRevision: main
+      ref: values
+  destination:
+    name: "{{ .Values.cluster }}"
+    {{- if .Values.projectNamespace }}
+    namespace: {{ .Values.projectNamespace }}
+    {{- end }}
+  {{- if .Values.syncPolicy }}
+  syncPolicy: {{- toYaml .Values.syncPolicy | nindent 8 }}
+  {{- end }}
+  {{- if .Values.ignoreDifferences }}
+  ignoreDifferences: {{- toYaml .Values.ignoreDifferences | nindent 8 }}
+  {{- end }}

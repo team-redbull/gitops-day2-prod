@@ -1,0 +1,31 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: {{ .Values.group }}-app-projects
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  generators:
+    - clusters: {}
+  template:
+    metadata:
+      name: '{{ .Values.group }}-app-projects-{{ "{{" }}name{{ "}}" }}'
+      namespace: gitops-{{ .Values.repository }}
+    spec:
+      project: default
+      source:
+        repoURL: 'https://8200gitlab[REDACTED]/redbull/helm-charts/argo-appproject.git'
+        path: .
+        targetRevision: main
+        helm:
+          ignoreMissingValueFiles: true
+          values: |
+            group: '{{ .Values.group }}'
+      destination:
+        name: '{{ "{{" }}name{{ "}}" }}'
+        namespace: openshift-gitops
+      syncPolicy:
+        automated:
+          selfHeal: true
+          prune: false

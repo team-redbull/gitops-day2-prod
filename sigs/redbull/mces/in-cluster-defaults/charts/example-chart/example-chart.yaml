@@ -1,0 +1,6 @@
+projectNamespace: example-namespace
+repoUrl: ...helm-charts...
+targetRevision: main
+syncPolicy:
+  syncOptions:
+    - CreateNamespace=true

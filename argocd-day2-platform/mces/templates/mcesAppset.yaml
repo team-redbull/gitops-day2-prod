@@ -1,0 +1,36 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: {{ .Values.group }}-mces
+  namespace: gitops-{{ .Values.group }}
+spec:
+  generators:
+    - git:
+        repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+        revision: main
+        directories:
+          - path: "mces/*"
+          - path: "mces/in-cluster-defaults"
+            exclude: true
+  template:
+    metadata:
+      name: '{{ .Values.group }}-{{ "{{" }}path.basename{{ "}}" }}'
+      namespace: gitops-{{ .Values.repository }}
+    spec:
+      project: '{{ .Values.group }}'
+      source:
+        repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/argocd-day2-platform.git'
+        targetRevision: main
+        path: clusters
+        helm:
+          ignoreMissingValueFiles: true
+          values: |
+            group: '{{ .Values.group }}'
+            mce: '{{ "{{" }}path.basename{{ "}}" }}'
+      destination:
+        name: '{{ "{{" }}path.basename{{ "}}" }}'
+        namespace: gitops-{{ .Values.group }}
+      syncPolicy:
+        automated:
+          selfHeal: true
+          prune: false

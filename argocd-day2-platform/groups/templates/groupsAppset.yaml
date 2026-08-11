@@ -1,0 +1,41 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: groups
+  namespace: openshift-gitops
+spec:
+  generators:
+    - scmProvider:
+        gitlab:
+          # The base GitLab group to scan.  You can either use the group id or the full namespaced path.
+          group: "243709"
+          # For self-hosted GitLab:
+          api: https://8200gitlab[REDACTED]/
+          # If true, skips validating the SCM provider's TLS certificate - useful for self-signed certificates.
+          insecure: true
+          tokenRef:
+            secretName: gitops-day2
+            key: token
+  template:
+    metadata:
+      name: '{{ "{{" }}repository{{ "}}" }}'
+      namespace: gitops-{{ "{{" }}repository{{ "}}" }}
+    spec:
+      project: default
+      source:
+        repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/argocd-day2-platform.git'
+        targetRevision: main
+        path: mces
+        helm:
+          ignoreMissingValueFiles: true
+          values: |
+            group: '{{ "{{" }}repository{{ "}}" }}'
+      destination:
+        name: in-cluster
+        namespace: gitops-{{ "{{" }}repository{{ "}}" }}
+      syncPolicy:
+        automated:
+          selfHeal: true
+          prune: false
+        syncOptions:
+          - CreateNamespace=true
