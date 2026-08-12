@@ -1,0 +1,40 @@
+# The DHCP API bearer token, deployed once per MCE in-cluster.
+#
+# Every hosted cluster's Crossplane Request reads THIS ONE Secret, across
+# namespaces: provider-http's ClusterRole grants secrets/* cluster-wide, so one
+# copy per cluster is enough for all of them. Before this, the token was rendered
+# into every hcp-<cluster> namespace — N copies of one credential per MCE, all of
+# which had to rotate together.
+#
+# projectNamespace matches the mgmt cluster's namespace on purpose, so
+# dhcp_api.tokenSecretRef.namespace in hostedclusters-setup is one literal
+# everywhere and the two copies of that chart cannot disagree about it. Here the
+# namespace holds ONLY the token — the API itself runs on the mgmt cluster.
+#
+# path: the SUBCHART, not the chart root. The root is the full API deployment
+# (Deployment, Service, Route, ServiceAccount); an MCE needs the Secret and
+# nothing else. The token value lives in that subchart's own values.yaml, which is
+# the base of the merge whether it renders standalone (here) or nested under
+# dhcp-scope-manager (mgmt) — so there is deliberately no values.yaml in this
+# folder, and rotation is one commit in one file for both.
+projectNamespace: dhcp-scope-manager
+# repourl, all lowercase — that is the key deployApp.yaml reads (`.Values.repourl`),
+# verified against the air-gapped repo. Several deploy configs in this repo write
+# `repoUrl`; that spelling reaches the template as nil and renders an empty
+# repoURL, so do not copy it from them.
+repourl: https://8200gitlab[REDACTED]/redbull/helm-charts/dhcp-scope-manager.git
+targetRevision: main
+path: charts/dhcp-api-token
+syncPolicy:
+  automated:
+    selfHeal: true
+    # prune: true so deleting this folder removes the Secret rather than stranding
+    # a live credential on every MCE. The flip side: an accidental deletion 401s
+    # every scope write on that MCE until it is restored. Reads still work — they
+    # are anonymous — so the symptom is scopes that stop converging, not an outage.
+    prune: true
+  syncOptions:
+    # Nothing else creates this namespace on an MCE, and the chart deliberately
+    # renders no Namespace object of its own (it stamps no namespace at all, so the
+    # Secret lands in the destination above).
+    - CreateNamespace=true
