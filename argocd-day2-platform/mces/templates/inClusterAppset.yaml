@@ -1,0 +1,43 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: {{ .Values.group }}-in-cluster
+  namespace: gitops-{{ .Values.group }}
+spec:
+  generators:
+    - git:
+        repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+        revision: main
+        directories:
+          - path: "in-cluster/*"
+  template:
+    metadata:
+      name: '{{ .Values.group }}-in-cluster-{{ "{{" }}path.basename{{ "}}" }}'
+    spec:
+      project: '{{ .Values.group }}'
+      sources:
+        - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/argocd-day2-platform.git'
+          targetRevision: main
+          path: deploy
+          helm:
+            ignoreMissingValueFiles: true
+            values: |
+              group: '{{ .Values.group }}'
+              cluster: in-cluster
+              hub: true
+              operator: {{ "{{" }}path.basename{{ "}}" }}
+            valueFiles:
+              - '$values/operators/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+              - '$values/in-cluster/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+        - ref: values
+          repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+          targetRevision: main
+      destination:
+        name: in-cluster
+        namespace: gitops-{{ .Values.group }}
+      syncPolicy:
+        automated:
+          selfHeal: true
+          prune: false
+        syncOptions:
+          - CreateNamespace=true

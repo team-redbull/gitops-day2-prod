@@ -24,11 +24,14 @@ spec:
           - '$values/operators/{{ .Values.operator }}/values.yaml'
           - '$values/mces/{{ .Values.mce }}/values.yaml'
           - '$values/mces/{{ .Values.mce }}/{{ .Values.cluster }}/values.yaml'
-          {{- if eq .Values.cluster "in-cluster" }}
+          {{- if and (eq .Values.cluster "in-cluster") (not .Values.hub) }}
           - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values.yaml'
           - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values-{{ .Values.mce }}.yaml'
           {{- end }}
           - '$values/mces/{{ .Values.mce }}/{{ .Values.cluster }}/{{ .Values.operator }}/values.yaml'
+          {{- if .Values.hub }}
+          - '$values/in-cluster/{{ .Values.operator }}/values.yaml'
+          {{- end }}
     - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
       targetRevision: main
       ref: values

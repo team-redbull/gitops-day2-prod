@@ -1,249 +1,241 @@
-# in-cluster-defaults — changes to apply in the air-gapped repos
+# Top-level `in-cluster/` (prod-hub charts) — changes to apply in the air-gapped repos
 
-Everything done in this mock since the start, as git-style unified diffs against the
-pre-change (production) file contents. `-` lines exist today, `+` lines are the
-additions — there are **no removed or modified lines anywhere, only additions and
-new files**. Line numbers may drift slightly if a prod file differs from the mock;
-anchor each hunk by its context lines, not by line number.
+This refactor only: `sigs/<team>/in-cluster/<chart>/` deploys `<chart>` onto the
+**prod-hub mgmt cluster itself** (the cluster running the `groups` ApplicationSet
+in `openshift-gitops`). It claims the top-level reservation stated in
+`sigs/redbull/mces/in-cluster-defaults/README.md`: a folder's name is the
+destination as seen by the consuming Argo; the repo top level is consumed by
+prod-hub's Argo, and `in-cluster` is prod-hub's name for itself.
+
+Diffs are git-style unified diffs against the pre-change production file
+contents. One existing line is **modified** (the deployApp defaults guard —
+called out below); everything else is additions and new files. Anchor each hunk
+by its context lines, not by line number.
+
+Resulting chain, per team, entirely on prod-hub's Argo:
+
+```
+groups app (renders platform mces chart, ns gitops-<group>)
+  → ApplicationSet <group>-in-cluster        (git dirs generator: in-cluster/* in team repo)
+    → Application <group>-in-cluster-<chart>       (platform deploy chart, hub mode)
+      → Application <group>-in-cluster-<chart>-deploy   (the actual helm chart,
+        destination in-cluster = prod-hub, namespace = projectNamespace, releaseName <chart>)
+```
 
 ---
 
-## ⚠️ Apply order
+## ⚠️ Apply order — none required
 
-1. **`argocd-day2-platform`** — all five diffs below, **one commit** (the
-   clustersAppset exclude and the new static `inClusterApp.yaml` must never ship
-   separately — apart they produce a missing or duplicated `<group>-in-cluster`
-   app).
-   Impact per MCE:
-   - **MCE that has a `mces/<mce>/in-cluster/` folder** — one-time ownership
-     handoff of `<group>-in-cluster` from the clusters appset to the static
-     template. The appset cascade-deletes the Argo CR subtree (operators appset,
-     generated apps, deploy app CRs) and the static app rebuilds it under the
-     same names. **Deployed workloads are untouched** (deploy apps carry no
-     resources finalizer; the rebuilt apps re-adopt by comparison — same names,
-     same releaseNames), but expect a few minutes of Argo CR churn per MCE with
-     no self-heal for those apps during the window. Optional zero-churn variant:
-     right before the push, strip the finalizer from `<group>-in-cluster` on
-     each MCE hub (`kubectl -n gitops-<group> patch application
-     <group>-in-cluster --type json -p
-     '[{"op":"remove","path":"/metadata/finalizers"}]'`) — then the operators
-     appset survives the handoff and nothing below it is recreated. A lost race
-     (controller re-adds the finalizer before the push lands) merely degrades to
-     the churn case.
-   - **MCE without an `in-cluster/` folder** — gains a dormant static
-     `<group>-in-cluster` app plus an empty operators appset, and from then on
-     receives defaults charts automatically (this is the point of the static
-     app: defaults no longer require the folder to exist).
-   - **Hosted (spoke) cluster apps** — render byte-identical.
-   *Preconditions:* verify no team's sigs repo already contains a folder named
-   `mces/in-cluster-defaults` — and in particular none with the OLD nested
-   `charts/` layout (this doc's layout is flat; a `charts/` directory would be
-   generated as a bogus `<group>-in-cluster-charts` app on every hub); verify
-   nothing besides the mcesAppset scans `mces/*` in team repos.
-2. **`sigs/redbull`** — add the folder (flat layout below). **Never before
-   step 1**: without the mcesAppset exclude, the folder is generated as a bogus
-   "MCE" Application with a nonexistent destination cluster.
-3. Per chart, later: add new charts (new apps only) or migrate duplicated ones
-   (runbook in the folder's README — verify pre-merge, `selfHeal` leaves no
-   post-merge window).
+**Both orderings are independently no-ops** (contrast with in-cluster-defaults,
+which had a hard exclude-first constraint):
+
+- Nothing in prod scans a team repo's **top-level** directories — the only
+  team-repo generators are the `mces/...` ones. Creating `sigs/<team>/in-cluster/`
+  before the platform change is inert.
+- Shipping the platform change first leaves each `<group>-in-cluster`
+  ApplicationSet generating **zero** Applications until that team creates the
+  folder.
+
+Impact when the platform change lands:
+
+- **Cross-group blast radius:** the `mces` chart renders for *every* team the
+  groups appset discovers — each group's `gitops-<group>` namespace gains one new
+  `<group>-in-cluster` ApplicationSet CR (additive resource in the already-synced
+  `<repository>` Application; `prune: false`, selfHeal untouched). Zero generated
+  Applications everywhere until a team opts in with the folder.
+- **Every existing Application renders byte-identically** (verified below): the
+  new deployApp entries render only with `hub: true`, which nothing existing
+  passes, and the tightened defaults guard is truth-value-identical with `hub`
+  unset.
+
+**Precondition before the first real chart folder** (not before the plumbing):
+verify the AppProject `<group>` on prod-hub permits destination `in-cluster` plus
+the chart's target namespace. Deploy-type Applications under project `<group>`
+have never existed on the prod-hub Argo — if `helm-charts/argo-appproject.git`
+restricts destinations or namespaces, the first hub app is rejected by the
+project. Check once, before onboarding the first tenant.
 
 ---
 
 ## Repo 1: `argocd-day2-platform`
 
-### `mces/templates/mcesAppset.yaml` — exclude the defaults folder from MCE discovery
+### `mces/templates/inClusterAppset.yaml` — NEW FILE: hub charts ApplicationSet
 
-```diff
---- a/mces/templates/mcesAppset.yaml
-+++ b/mces/templates/mcesAppset.yaml
-@@ -10,6 +10,8 @@
-         revision: main
-         directories:
-           - path: "mces/*"
-+          - path: "mces/in-cluster-defaults"
-+            exclude: true
-   template:
-     metadata:
-       name: '{{ .Values.group }}-{{ "{{" }}path.basename{{ "}}" }}'
-```
-
-### `clusters/templates/clustersAppset.yaml` — stop discovering `in-cluster` from git
-
-```diff
---- a/clusters/templates/clustersAppset.yaml
-+++ b/clusters/templates/clustersAppset.yaml
-@@ -9,6 +9,8 @@
-         revision: main
-         directories:
-           - path: "mces/{{ .Values.mce }}/*"
-+          - path: "mces/{{ .Values.mce }}/in-cluster"
-+            exclude: true
-   template:
-     metadata:
-```
-
-### `clusters/templates/inClusterApp.yaml` — NEW FILE: static in-cluster Application
-
-The MCE hub app is rendered unconditionally per MCE instead of being discovered
-from a `mces/<mce>/in-cluster/` folder — so defaults reach every MCE hub even
-when that folder doesn't exist. Ships atomically with the exclude above (same
-commit). Pure Helm — no `path.basename` escaping. The `repoURL` must match the
-platform-repo URL your prod clustersAppset template already uses.
+Modeled on `operators/templates/operators.yaml` (plain templates, `path.basename`
+only). The two team-repo `repoURL` lines and the platform `repoURL` line must
+match whatever your prod `mcesAppset.yaml`/`operators.yaml` already use — copy
+them from there.
 
 ```diff
 --- /dev/null
-+++ b/clusters/templates/inClusterApp.yaml
-@@ -0,0 +1,26 @@
++++ b/mces/templates/inClusterAppset.yaml
+@@ -0,0 +1,43 @@
 +apiVersion: argoproj.io/v1alpha1
-+kind: Application
++kind: ApplicationSet
 +metadata:
 +  name: {{ .Values.group }}-in-cluster
 +  namespace: gitops-{{ .Values.group }}
 +spec:
-+  project: '{{ .Values.group }}'
-+  sources:
-+    - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/argocd-day2-platform.git'
-+      targetRevision: main
-+      path: operators
-+      helm:
-+        ignoreMissingValueFiles: true
-+        values: |
-+          group: '{{ .Values.group }}'
-+          mce: {{ .Values.mce }}
-+          cluster: 'in-cluster'
-+  destination:
-+    name: in-cluster
-+    namespace: gitops-{{ .Values.group }}
-+  syncPolicy:
-+    automated:
-+      selfHeal: true
-+      prune: false
-+    syncOptions:
-+      - CreateNamespace=true
-```
-
-### `operators/templates/operators.yaml` — second generator + config layer (in-cluster only)
-
-```diff
---- a/operators/templates/operators.yaml
-+++ b/operators/templates/operators.yaml
-@@ -10,6 +10,13 @@
-         revision: main
-         directories:
-           - path: "mces/{{ .Values.mce }}/{{ .Values.cluster }}/*"
-+    {{- if eq .Values.cluster "in-cluster" }}
++  generators:
 +    - git:
 +        repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
 +        revision: main
 +        directories:
-+          - path: "mces/in-cluster-defaults/*"
-+    {{- end }}
-   template:
-     metadata:
-       name: '{{ .Values.group }}-{{ .Values.cluster }}-{{ "{{" }}path.basename{{ "}}" }}'
-@@ -28,6 +35,9 @@
-               operator: {{ "{{" }}path.basename{{ "}}" }}
-             valueFiles:
-               - '$values/operators/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
-+              {{- if eq .Values.cluster "in-cluster" }}
-+              - '$values/mces/in-cluster-defaults/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
-+              {{- end }}
-               - '$values/mces/{{ .Values.mce }}/{{ .Values.cluster }}/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
-         - ref: values
-           repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
++          - path: "in-cluster/*"
++  template:
++    metadata:
++      name: '{{ .Values.group }}-in-cluster-{{ "{{" }}path.basename{{ "}}" }}'
++    spec:
++      project: '{{ .Values.group }}'
++      sources:
++        - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/argocd-day2-platform.git'
++          targetRevision: main
++          path: deploy
++          helm:
++            ignoreMissingValueFiles: true
++            values: |
++              group: '{{ .Values.group }}'
++              cluster: in-cluster
++              hub: true
++              operator: {{ "{{" }}path.basename{{ "}}" }}
++            valueFiles:
++              - '$values/operators/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
++              - '$values/in-cluster/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
++        - ref: values
++          repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
++          targetRevision: main
++      destination:
++        name: in-cluster
++        namespace: gitops-{{ .Values.group }}
++      syncPolicy:
++        automated:
++          selfHeal: true
++          prune: false
++        syncOptions:
++          - CreateNamespace=true
 ```
 
-(The generator's `repoURL` line must match whatever the existing generator in your
-prod file uses — copy it from the line a few rows above.)
+Notes:
 
-### `deploy/templates/deployApp.yaml` — two value layers (in-cluster only)
+- `hub: true` is what routes the deploy chart into hub mode (see next diff).
+- `cluster: in-cluster` is the prod-hub local cluster's destination name; it also
+  makes the generated names follow the existing `<group>-<cluster>-<op>`
+  convention. Apps with similar names on the MCE Argos are a different API
+  server — no collision, and the overlap is what the naming convention
+  prescribes (same word, same meaning, different consuming Argo).
+- No `mce` value is passed — the mces-based valueFiles in deployApp render with
+  an empty segment (`$values/mces//values.yaml`, …), can never exist, and are
+  tolerated by `ignoreMissingValueFiles: true`.
+- No generator excludes: every directory under `in-cluster/*` is a chart by
+  convention (README rule in the team repo).
+- Deliberately uses `.Values.group` everywhere — do **not** copy the
+  `namespace: gitops-{{ .Values.repository }}` line from `mcesAppset.yaml`'s
+  template into new work (and do not "fix" it there either; out of scope).
 
-Placement is load-bearing: the new layers sit **after** the MCE/cluster-wide files
-and **before** the per-cluster chart file — the same precedence slot a chart's own
-values occupy today, so migrating a chart cannot flip any colliding key.
+### `deploy/templates/deployApp.yaml` — hub value layer + guard tightening
+
+⚠️ Contains this refactor's **only modified line**: the defaults guard gains
+`(not .Values.hub)`. Hub apps pass `cluster: in-cluster`, which would otherwise
+pull the MCE-fleet defaults layers (`mces/in-cluster-defaults/<op>/values*.yaml`)
+into a hub app whenever a chart name exists in both contexts. With `hub` unset,
+`not .Values.hub` is true — every existing app renders byte-identically.
+
+The appended hub entry is guarded by `hub: true` for the mirror-image reason:
+once a chart exists both on the hub and in the fleet flows,
+`in-cluster/<op>/values.yaml` exists in the team repo, and unguarded it would
+leak the hub's values into every fleet app for that chart. Appended last =
+highest precedence, matching the fleet flow where the most context-specific
+file is last.
 
 ```diff
 --- a/deploy/templates/deployApp.yaml
 +++ b/deploy/templates/deployApp.yaml
-@@ -24,6 +24,10 @@
+@@ -24,11 +24,14 @@ spec:
            - '$values/operators/{{ .Values.operator }}/values.yaml'
            - '$values/mces/{{ .Values.mce }}/values.yaml'
            - '$values/mces/{{ .Values.mce }}/{{ .Values.cluster }}/values.yaml'
-+          {{- if eq .Values.cluster "in-cluster" }}
-+          - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values.yaml'
-+          - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values-{{ .Values.mce }}.yaml'
-+          {{- end }}
+-          {{- if eq .Values.cluster "in-cluster" }}
++          {{- if and (eq .Values.cluster "in-cluster") (not .Values.hub) }}
+           - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values.yaml'
+           - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values-{{ .Values.mce }}.yaml'
+           {{- end }}
            - '$values/mces/{{ .Values.mce }}/{{ .Values.cluster }}/{{ .Values.operator }}/values.yaml'
++          {{- if .Values.hub }}
++          - '$values/in-cluster/{{ .Values.operator }}/values.yaml'
++          {{- end }}
      - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
        targetRevision: main
+       ref: values
 ```
+
+Effective value stack for a hub app (lowest → highest):
+`operators/<chart>/values.yaml` → `in-cluster/<chart>/values.yaml`. There is
+deliberately **no** hub-wide `in-cluster/values.yaml` layer — `in-cluster/`
+holds only chart folders. Deploy config precedence mirrors it:
+`operators/<chart>/<chart>.yaml` → `in-cluster/<chart>/<chart>.yaml`.
 
 ---
 
 ## Repo 2: `sigs/redbull`
 
-New files only — nothing existing was touched.
-
-Layout is **flat** — chart folders sit directly under `in-cluster-defaults/`,
-there is no intermediate `charts/` level. Consequence: every directory here
-becomes a generated Application, so never create non-chart directories (plain
-files like the README are ignored by the directory generator).
+New folder plus one docs edit (the in-cluster-defaults README's "top level is
+reserved" paragraph now points at the claimed reservation — copy the updated
+paragraph from the mock).
 
 ```
 sigs/redbull/
-└── mces/
-    └── in-cluster-defaults/          ← NEW
-        ├── README.md                  (conventions, precedence, migration runbook — copy verbatim from the mock)
-        └── example-chart/             ⚠️ convention demo — do NOT ship to prod (placeholder repoUrl
-            │                             would create a failing Application on every MCE)
-            ├── example-chart.yaml
-            ├── values.yaml                          (empty)
-            └── values-ocp4-prep-mce-site1-a.yaml    (empty)
+├── in-cluster/                       ← NEW
+│   ├── README.md                      (conventions, precedence, rollout — copy verbatim from the mock)
+│   └── example-chart/                 ⚠️ convention demo — do NOT ship to prod (placeholder repourl
+│       │                                 would create a failing Application on prod-hub)
+│       ├── example-chart.yaml
+│       └── values.yaml                (empty)
+└── mces/in-cluster-defaults/README.md (edited paragraph only)
 ```
 
 ```diff
 --- /dev/null
-+++ b/mces/in-cluster-defaults/example-chart/example-chart.yaml
-@@ -0,0 +1,6 @@
++++ b/in-cluster/example-chart/example-chart.yaml
+@@ -0,0 +1,10 @@
++# Example deploy config for a chart on the prod-hub mgmt cluster.
 +projectNamespace: example-namespace
-+repoUrl: ...helm-charts...
++# repourl, all lowercase — that is the key deployApp.yaml reads (`.Values.repourl`).
++# Several deploy configs in this repo write `repoUrl`; that spelling reaches the
++# template as nil and renders an empty repoURL, so do not copy it from them.
++repourl: ...helm-charts...
 +targetRevision: main
 +syncPolicy:
 +  syncOptions:
 +    - CreateNamespace=true
 ```
 
-In prod, create the folder with your first real chart (or just the README) — a
-chart dir here follows the exact same convention as `mces/<mce>/in-cluster/<chart>/`:
-`<chart>.yaml` deploy config + `values.yaml`, plus optional `values-<mce>.yaml`
-per-MCE overrides.
+Team-repo rules (full detail in `sigs/redbull/in-cluster/README.md`): every
+directory directly under `in-cluster/` becomes an Application on prod-hub —
+plain files are ignored and safe, non-chart directories are forbidden; only
+chart folders live here (no hub-wide values file); a chart may exist both here
+and in the `mces/` flows (different destinations, no XOR — they share only the
+`operators/<chart>/` layer); `repourl` is all-lowercase.
 
 ---
 
 ## What was verified
 
-Original implementation (nested `charts/` layout) — live-verified on
-Argo CD 3.1.11 via `helm template` old vs new:
+Helm-render verified in the mock (2026-08-12) — **not yet live-verified**;
+`helm template` does not execute git generators, and the AppProject
+precondition above can only be checked in prod:
 
-| Render                          | Result                                                        |
-|---------------------------------|---------------------------------------------------------------|
-| operators chart, hosted cluster | byte-identical                                                |
-| deploy chart, hosted cluster    | byte-identical                                                |
-| mces chart                      | only the two exclude lines                                    |
-| operators chart, in-cluster     | only the added generator + one missing-tolerant valueFiles    |
-| deploy chart, in-cluster        | only the two missing-tolerant valueFiles                      |
-| value resolution on migration   | identical, including deliberately colliding keys              |
+| Render                                                     | Result                                                       |
+|------------------------------------------------------------|--------------------------------------------------------------|
+| deploy chart: hosted cluster                                | byte-identical                                               |
+| deploy chart: MCE in-cluster (exercises tightened guard)    | byte-identical                                               |
+| deploy chart: `oldConvention: true`                         | byte-identical                                               |
+| deploy chart: `appname` override                            | byte-identical                                               |
+| mces chart (`group=redbull`)                                | exactly one added document — the new ApplicationSet; `mcesAppset`/`appProjectAppset` byte-identical |
+| deploy chart: hub mode (`hub: true`)                        | hub layer appended last, defaults layers absent, operators layer first; name `redbull-in-cluster-example-chart-deploy`, releaseName `example-chart`, destination `in-cluster` |
 
-2026-08-11 revision (flat layout + static in-cluster app, i.e. the diffs as they
-now appear above) — **helm-render verified in the mock only, not yet
-live-verified**: clusters chart renders the static app + excluded generator;
-operators appset (in-cluster) carries both generators with the flat paths; a
-spoke render contains zero in-cluster-defaults references; deploy valueFiles
-resolve to the flat paths. Rehearse the ownership handoff in the mock before the
-prod push.
-
-Rules that keep it safe long-term (full detail in
-`sigs/redbull/mces/in-cluster-defaults/README.md`): a chart lives in defaults XOR
-a per-MCE `in-cluster` dir; per-MCE overrides for defaults charts go in
-`values-<mce>.yaml` inside the defaults chart dir (never create a per-MCE chart
-dir just for values); any future scanner of `mces/*` must replicate the exclude.
+First tenant (planned, out of scope here): the DHCP scope manager API root chart
+— one folder-add (`in-cluster/dhcp-scope-manager/`, `path: .`,
+`projectNamespace: dhcp-scope-manager`) plus removing the app from the
+redbull-platform repo. The service is pre-production, so the hand-off needs no
+migration ceremony; its `dhcp-api-token` subchart stays per-MCE via
+`mces/in-cluster-defaults/`.

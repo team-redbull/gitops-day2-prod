@@ -7,8 +7,9 @@ instead of duplicating it under `mces/<mce>/in-cluster/` for each MCE.
 Naming convention in this repo: a folder's name is the destination as seen by the
 Argo that consumes it. `mces/<mce>/in-cluster/` = the MCE hub (from the MCE's
 argo); this folder = defaults for those. The repo **top level is reserved for
-prod-hub context** (e.g. a future `in-cluster/` folder for team charts on the
-prod-hub mgmt cluster) — that's why this folder lives under `mces/`.
+prod-hub context** — that's why this folder lives under `mces/`. The top-level
+[`in-cluster/`](../../in-cluster/) folder (team charts on the prod-hub mgmt
+cluster) is that reservation claimed; see its README.
 
 ## Layout
 
