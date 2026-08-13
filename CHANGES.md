@@ -18,8 +18,9 @@ This hand-off migrates the day2 repos to the architecture in
 (commit history mirrors the phase order — one commit per step below).
 Helm-render verified, **not live-verified**: `helm template` does not execute
 git generators; the offline harness (`tools/render-verify/render_chain.py`,
-copy it across) simulates the documented generator params and asserts, per
-phase, that all 35 generated apps keep identical names, destinations,
+copy it across; it hardcodes `GROUP = "redbull"` near the top — set it to the
+team whose repo you are verifying) simulates the documented generator params
+and asserts, per phase, that all 35 generated apps keep identical names, destinations,
 releaseNames, syncPolicies and identical *resolved value-file content
 sequences*. Re-run it against your repos at every phase gate; re-verify
 against live Argo behavior on the first phase you apply.

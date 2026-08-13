@@ -3,8 +3,9 @@
 Everything this team deploys through the day2 GitOps platform lives here.
 The platform (`argocd-day2-prod/argocd-day2-platform`) scans this repo with
 ApplicationSet generators; **folders are discovered, files are read — nothing
-is registered anywhere else**. The deep-dive is in the platform repo's
-`ARCHITECTURE.md`; this README is the working contract.
+is registered anywhere else**. The deep-dive is in `ARCHITECTURE.md` at
+the day2 repo root next to `CHANGES.md` (in the air-gapped env, keep a copy in
+the platform repo); this README is the working contract.
 
 ## The tree
 

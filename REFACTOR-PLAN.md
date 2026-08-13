@@ -1,6 +1,9 @@
 # Day2 Management Refactor — Architecture Review & Plan
 
-**Status: PLAN ONLY — nothing implemented.** Date: 2026-08-13.
+**Status: IMPLEMENTED in the mock, 2026-08-13** — one commit per migration phase,
+render-verified at every gate. `CHANGES.md` is the air-gap hand-off;
+`ARCHITECTURE.md` is the team guide. This document remains the reviewed design
+rationale. (Original date: 2026-08-13.)
 
 This document is self-contained: current-state findings, review of the proposed
 architecture, the recommended target design, and a zero-impact migration plan.
