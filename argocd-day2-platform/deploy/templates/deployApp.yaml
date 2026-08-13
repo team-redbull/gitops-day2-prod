@@ -37,7 +37,6 @@ spec:
         valueFiles:
           {{- if .Values.hub }}
           - '$values/operators/{{ .Values.operator }}/values.yaml'
-          - '$values/in-cluster/{{ .Values.operator }}/values.yaml'
           - '$values/defaults/hub/{{ .Values.operator }}/values.yaml'
           {{- else }}
           - '$values/operators/{{ .Values.operator }}/values.yaml'
@@ -45,8 +44,6 @@ spec:
           - '$values/sites/{{ .Values.site }}/values.yaml'
           - '$values/sites/{{ .Values.site }}/{{ .Values.env }}/values.yaml'
           {{- if eq .Values.cluster "in-cluster" }}
-          - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values.yaml'
-          - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values-{{ .Values.mce }}.yaml'
           - '$values/defaults/mces/{{ .Values.operator }}/values.yaml'
           - '$values/defaults/mces/{{ .Values.operator }}/values-{{ .Values.env }}.yaml'
           - '$values/defaults/mces/{{ .Values.operator }}/values-{{ .Values.mce }}.yaml'

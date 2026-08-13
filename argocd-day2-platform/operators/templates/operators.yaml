@@ -15,10 +15,6 @@ spec:
         repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
         revision: main
         directories:
-          # Migration window: old and new location of the every-MCE defaults.
-          # Only one folder exists at any commit (XOR); the old glob is
-          # removed once the sigs move lands.
-          - path: "mces/in-cluster-defaults/*"
           - path: "defaults/mces/*"
     {{- else if not .Values.hub }}
     # Fleet defaults for hosted clusters: every chart folder here is deployed
@@ -67,7 +63,6 @@ spec:
               - '$values/operators/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
               - '$values/operators/{{ "{{" }}path.basename{{ "}}" }}/versions/ocp-{{ .Values.ocpVersion }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
               {{- if eq .Values.cluster "in-cluster" }}
-              - '$values/mces/in-cluster-defaults/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
               - '$values/defaults/mces/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
               {{- else }}
               - '$values/defaults/hosted-clusters/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'

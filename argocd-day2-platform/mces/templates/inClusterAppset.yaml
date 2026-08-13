@@ -9,10 +9,6 @@ spec:
         repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
         revision: main
         directories:
-          # Migration window: the old top-level in-cluster/ location and its
-          # defaults/hub/ replacement. Only one folder exists at any commit
-          # (XOR); the old glob is removed once the sigs move lands.
-          - path: "in-cluster/*"
           - path: "defaults/hub/*"
   template:
     metadata:
@@ -38,7 +34,6 @@ spec:
               operator: {{ "{{" }}path.basename{{ "}}" }}
             valueFiles:
               - '$values/operators/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
-              - '$values/in-cluster/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
               - '$values/defaults/hub/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
         - ref: values
           repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
