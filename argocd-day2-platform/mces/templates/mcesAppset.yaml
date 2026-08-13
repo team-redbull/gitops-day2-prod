@@ -8,14 +8,25 @@ spec:
     - git:
         repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
         revision: main
-        directories:
-          - path: "mces/*"
-          - path: "mces/in-cluster-defaults"
-            exclude: true
+        # An MCE is a folder holding a config.yaml (env, site, ocpVersion).
+        # Folders without one (in-cluster-defaults, docs, ...) are invisible —
+        # this replaces the old in-cluster-defaults exclude. The two globs
+        # serve the legacy layout and the sites/ tree during the migration
+        # window; the legacy one is removed in Phase D.
+        files:
+          - path: "mces/*/config.yaml"
+          - path: "sites/*/*/mces/*/config.yaml"
   template:
     metadata:
       name: '{{ .Values.group }}-{{ "{{" }}path.basename{{ "}}" }}'
       namespace: gitops-{{ .Values.repository }}
+      labels:
+        day2.gitops/team: '{{ .Values.group }}'
+        day2.gitops/env: '{{ "{{" }}env{{ "}}" }}'
+        day2.gitops/site: '{{ "{{" }}site{{ "}}" }}'
+        day2.gitops/mce: '{{ "{{" }}path.basename{{ "}}" }}'
+        day2.gitops/ocp-version: '{{ "{{" }}ocpVersion{{ "}}" }}'
+        day2.gitops/role: mce
     spec:
       project: '{{ .Values.group }}'
       source:
@@ -27,6 +38,10 @@ spec:
           values: |
             group: '{{ .Values.group }}'
             mce: '{{ "{{" }}path.basename{{ "}}" }}'
+            mcePath: '{{ "{{" }}path{{ "}}" }}'
+            env: '{{ "{{" }}env{{ "}}" }}'
+            site: '{{ "{{" }}site{{ "}}" }}'
+            ocpVersion: '{{ "{{" }}ocpVersion{{ "}}" }}'
       destination:
         name: '{{ "{{" }}path.basename{{ "}}" }}'
         namespace: gitops-{{ .Values.group }}

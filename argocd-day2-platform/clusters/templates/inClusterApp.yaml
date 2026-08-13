@@ -3,6 +3,15 @@ kind: Application
 metadata:
   name: {{ .Values.group }}-in-cluster
   namespace: gitops-{{ .Values.group }}
+  labels:
+    day2.gitops/team: '{{ .Values.group }}'
+    day2.gitops/env: '{{ .Values.env }}'
+    day2.gitops/site: '{{ .Values.site }}'
+    day2.gitops/mce: '{{ .Values.mce }}'
+    day2.gitops/cluster: in-cluster
+    # The MCE's own OCP version — in-cluster charts resolve version layers by it.
+    day2.gitops/ocp-version: '{{ .Values.ocpVersion }}'
+    day2.gitops/role: mce
 spec:
   project: '{{ .Values.group }}'
   sources:
@@ -14,7 +23,12 @@ spec:
         values: |
           group: '{{ .Values.group }}'
           mce: {{ .Values.mce }}
+          mcePath: {{ .Values.mcePath }}
           cluster: 'in-cluster'
+          clusterPath: {{ .Values.mcePath }}/in-cluster
+          env: {{ .Values.env }}
+          site: {{ .Values.site }}
+          ocpVersion: '{{ .Values.ocpVersion }}'
   destination:
     name: in-cluster
     namespace: gitops-{{ .Values.group }}

@@ -9,7 +9,7 @@ spec:
         repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
         revision: main
         directories:
-          - path: "mces/{{ .Values.mce }}/{{ .Values.cluster }}/*"
+          - path: "{{ .Values.clusterPath }}/*"
     {{- if eq .Values.cluster "in-cluster" }}
     - git:
         repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
@@ -20,6 +20,15 @@ spec:
   template:
     metadata:
       name: '{{ .Values.group }}-{{ .Values.cluster }}-{{ "{{" }}path.basename{{ "}}" }}'
+      labels:
+        day2.gitops/team: '{{ .Values.group }}'
+        day2.gitops/env: '{{ .Values.env }}'
+        day2.gitops/site: '{{ .Values.site }}'
+        day2.gitops/mce: '{{ .Values.mce }}'
+        day2.gitops/cluster: '{{ .Values.cluster }}'
+        day2.gitops/chart: '{{ "{{" }}path.basename{{ "}}" }}'
+        day2.gitops/ocp-version: '{{ .Values.ocpVersion }}'
+        day2.gitops/role: {{ eq .Values.cluster "in-cluster" | ternary "mce" "hosted-cluster" }}
     spec:
       project: '{{ .Values.group }}'
       sources:
@@ -31,14 +40,23 @@ spec:
             values: |
               group: '{{ .Values.group }}'
               mce: {{ .Values.mce }}
+              mcePath: {{ .Values.mcePath }}
               cluster: {{ .Values.cluster }}
+              clusterPath: {{ .Values.clusterPath }}
+              env: {{ .Values.env }}
+              site: {{ .Values.site }}
+              ocpVersion: '{{ .Values.ocpVersion }}'
               operator: {{ "{{" }}path.basename{{ "}}" }}
+            # Deploy-config stack, lowest -> highest: team default, per-OCP-stream
+            # pin (selected by the destination's own ocpVersion), fleet defaults,
+            # the cluster's own folder. All optional (ignoreMissingValueFiles).
             valueFiles:
               - '$values/operators/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+              - '$values/operators/{{ "{{" }}path.basename{{ "}}" }}/versions/ocp-{{ .Values.ocpVersion }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
               {{- if eq .Values.cluster "in-cluster" }}
               - '$values/mces/in-cluster-defaults/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
               {{- end }}
-              - '$values/mces/{{ .Values.mce }}/{{ .Values.cluster }}/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+              - '$values/{{ .Values.clusterPath }}/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
         - ref: values
           repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
           targetRevision: main

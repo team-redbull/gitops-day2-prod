@@ -7,6 +7,19 @@ metadata:
   name: {{ .Values.group }}-{{ .Values.cluster }}-{{ .Values.operator }}-deploy
   {{- end }}
   namespace: gitops-{{ .Values.group }}
+  labels:
+    day2.gitops/team: '{{ .Values.group }}'
+    day2.gitops/chart: '{{ .Values.operator }}'
+    {{- if .Values.hub }}
+    day2.gitops/role: hub
+    {{- else }}
+    day2.gitops/env: '{{ .Values.env }}'
+    day2.gitops/site: '{{ .Values.site }}'
+    day2.gitops/mce: '{{ .Values.mce }}'
+    day2.gitops/cluster: '{{ .Values.cluster }}'
+    day2.gitops/ocp-version: '{{ .Values.ocpVersion }}'
+    day2.gitops/role: {{ eq .Values.cluster "in-cluster" | ternary "mce" "hosted-cluster" }}
+    {{- end }}
 spec:
   project: '{{ .Values.group }}'
   sources:
@@ -20,17 +33,23 @@ spec:
         releaseName: {{ .Values.operator }}
         {{- end }}
         ignoreMissingValueFiles: true
+        # Workload-values stack, lowest -> highest. Every layer is optional.
         valueFiles:
+          {{- if .Values.hub }}
           - '$values/operators/{{ .Values.operator }}/values.yaml'
-          - '$values/mces/{{ .Values.mce }}/values.yaml'
-          - '$values/mces/{{ .Values.mce }}/{{ .Values.cluster }}/values.yaml'
-          {{- if and (eq .Values.cluster "in-cluster") (not .Values.hub) }}
+          - '$values/in-cluster/{{ .Values.operator }}/values.yaml'
+          {{- else }}
+          - '$values/operators/{{ .Values.operator }}/values.yaml'
+          - '$values/operators/{{ .Values.operator }}/versions/ocp-{{ .Values.ocpVersion }}/values.yaml'
+          - '$values/sites/{{ .Values.site }}/values.yaml'
+          - '$values/sites/{{ .Values.site }}/{{ .Values.env }}/values.yaml'
+          {{- if eq .Values.cluster "in-cluster" }}
           - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values.yaml'
           - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values-{{ .Values.mce }}.yaml'
           {{- end }}
-          - '$values/mces/{{ .Values.mce }}/{{ .Values.cluster }}/{{ .Values.operator }}/values.yaml'
-          {{- if .Values.hub }}
-          - '$values/in-cluster/{{ .Values.operator }}/values.yaml'
+          - '$values/{{ .Values.mcePath }}/values.yaml'
+          - '$values/{{ .Values.clusterPath }}/values.yaml'
+          - '$values/{{ .Values.clusterPath }}/{{ .Values.operator }}/values.yaml'
           {{- end }}
     - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
       targetRevision: main

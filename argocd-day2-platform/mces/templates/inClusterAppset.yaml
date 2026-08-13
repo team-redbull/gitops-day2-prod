@@ -13,6 +13,12 @@ spec:
   template:
     metadata:
       name: '{{ .Values.group }}-in-cluster-{{ "{{" }}path.basename{{ "}}" }}'
+      labels:
+        day2.gitops/team: '{{ .Values.group }}'
+        day2.gitops/chart: '{{ "{{" }}path.basename{{ "}}" }}'
+        # No env/site/mce/ocp-version labels: the prod-hub is version-less and
+        # outside the sites/ tree.
+        day2.gitops/role: hub
     spec:
       project: '{{ .Values.group }}'
       sources:
