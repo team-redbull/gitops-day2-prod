@@ -38,6 +38,7 @@ spec:
           {{- if .Values.hub }}
           - '$values/operators/{{ .Values.operator }}/values.yaml'
           - '$values/in-cluster/{{ .Values.operator }}/values.yaml'
+          - '$values/defaults/hub/{{ .Values.operator }}/values.yaml'
           {{- else }}
           - '$values/operators/{{ .Values.operator }}/values.yaml'
           - '$values/operators/{{ .Values.operator }}/versions/ocp-{{ .Values.ocpVersion }}/values.yaml'
@@ -46,6 +47,13 @@ spec:
           {{- if eq .Values.cluster "in-cluster" }}
           - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values.yaml'
           - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values-{{ .Values.mce }}.yaml'
+          - '$values/defaults/mces/{{ .Values.operator }}/values.yaml'
+          - '$values/defaults/mces/{{ .Values.operator }}/values-{{ .Values.env }}.yaml'
+          - '$values/defaults/mces/{{ .Values.operator }}/values-{{ .Values.mce }}.yaml'
+          {{- else }}
+          - '$values/defaults/hosted-clusters/{{ .Values.operator }}/values.yaml'
+          - '$values/defaults/hosted-clusters/{{ .Values.operator }}/values-{{ .Values.env }}.yaml'
+          - '$values/defaults/hosted-clusters/{{ .Values.operator }}/values-{{ .Values.cluster }}.yaml'
           {{- end }}
           - '$values/{{ .Values.mcePath }}/values.yaml'
           - '$values/{{ .Values.clusterPath }}/values.yaml'
