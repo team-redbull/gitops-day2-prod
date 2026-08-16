@@ -101,130 +101,352 @@ changes nothing anywhere (mock: verified zero diff, not even a spec change).
 
 ---
 
-## Phase B — platform repo: one MR (generators + parametric paths + labels)
+## Phase B — platform repo: ONE MR (generators + parametric paths + labels)
 
 > ⚠️ **HARD PRECONDITION: every team repo has completed Phase A before this
 > merges.** A team without config.yaml files at switch time gets its
 > `<group>-<mce>` apps deleted (workloads orphaned in place, unmanaged until
 > the files are added and the same-named apps recreate and re-adopt).
 
-Five templates change; `groups/templates/groupsAppset.yaml` and
-`mces/templates/appProjectAppset.yaml` are **untouched**. The mock rewrites
-below are full-file replacements; two rules when transplanting to prod:
+**Six** templates change, and they ship as **one MR / one commit** — this is
+where the parameter chain is born: `mcesAppset` starts emitting `mcePath` →
+`clustersAppset` / `inClusterApp` emit `clusterPath` + `ocpVersion` →
+`operators` / `deployApp` consume them. Split across pushes and there is an
+intermediate commit where a template reads a `{{ .Values.clusterPath }}` that
+nobody passes yet — empty path segments in live app specs, with `selfHeal: true`
+and no inspection window. `groups/templates/groupsAppset.yaml` and
+`mces/templates/appProjectAppset.yaml` are **untouched**.
 
-- Every `repoURL:` line must match what your prod files already use.
-- The template line `namespace: gitops-{{ .Values.repository }}` in
-  `mcesAppset.yaml` is **FROZEN** — keep it byte-identical (it renders
-  `gitops-`; "fixing" it changes every generated app's namespace → app
-  identity → fleet-wide delete/recreate).
+| # | File | What changes |
+|---|---|---|
+| 1 | `mces/templates/mcesAppset.yaml` | `directories` → `files` generator; emit mcePath/env/site/ocpVersion; labels |
+| 2 | `clusters/templates/clustersAppset.yaml` | `directories` → `files`, parametric; emit clusterPath + the cluster's own ocpVersion; labels |
+| 3 | `clusters/templates/inClusterApp.yaml` | parametric passthrough (no ocpVersion override); labels |
+| 4 | `operators/templates/operators.yaml` | gen-1 parametric; version-pin layer in the config stack; labels |
+| 5 | `deploy/templates/deployApp.yaml` | parametric paths + version/site layers; hub branch split out; labels |
+| 6 | `mces/templates/inClusterAppset.yaml` | labels only (6 lines) |
 
-### `mces/templates/mcesAppset.yaml` — directories → files generator
+Every hunk below is the mock's Phase B commit verbatim, with one substitution:
+`repoURL:` values are shown as `<sigs repo URL — unchanged>`. Two transplant
+rules:
 
-Replace the generator block and template with (Phase B form — both globs):
+- **`repoURL:` lines keep whatever your prod files already have.** They appear
+  as context so you can find the hunk — never edit them.
+- **The `namespace: gitops-{{ .Values.repository }}` line in `mcesAppset.yaml`
+  is FROZEN.** It appears below as unchanged context. Keep it byte-identical
+  (it renders `gitops-`; "fixing" it changes every generated app's namespace →
+  app identity → fleet-wide delete/recreate).
 
-```yaml
-spec:
-  generators:
-    - git:
-        repoURL: <your sigs repo URL, unchanged>
-        revision: main
-        # An MCE is a folder holding a config.yaml. Folders without one
-        # (in-cluster-defaults, docs, ...) are invisible — this replaces the
-        # in-cluster-defaults exclude. Two globs during the migration window;
-        # the legacy one is removed in Phase D.
-        files:
-          - path: "mces/*/config.yaml"
-          - path: "sites/*/*/mces/*/config.yaml"
-  template:
-    metadata:
-      name: '{{ "{{" }}path.basename{{ "}}" }}...'   # UNCHANGED from your prod file
-      namespace: gitops-{{ "{{" }}.Values.repository{{ "}}" }}   # FROZEN — byte-identical
-      labels:
-        day2.gitops/team: '<group value, as in mock>'
-        day2.gitops/env: '{{ "{{" }}env{{ "}}" }}'
-        day2.gitops/site: '{{ "{{" }}site{{ "}}" }}'
-        day2.gitops/mce: '{{ "{{" }}path.basename{{ "}}" }}'
-        day2.gitops/ocp-version: '{{ "{{" }}ocpVersion{{ "}}" }}'
-        day2.gitops/role: mce
-    spec:
-      # ... unchanged except helm.values gains:
-      #   mcePath: '{{ "{{" }}path{{ "}}" }}'
-      #   env / site / ocpVersion (quoted) passed through
+Locate each hunk by its context lines — the mock's line numbers won't match
+your files.
+
+### 1. `mces/templates/mcesAppset.yaml`
+
+**1a — generator + labels** (`spec.generators` through `spec.template.metadata`):
+
+```diff
+     - git:
+         repoURL: <sigs repo URL — unchanged>
+         revision: main
+-        directories:
+-          - path: "mces/*"
+-          - path: "mces/in-cluster-defaults"
+-            exclude: true
++        # An MCE is a folder holding a config.yaml (env, site, ocpVersion).
++        # Folders without one (in-cluster-defaults, docs, ...) are invisible —
++        # this replaces the old in-cluster-defaults exclude. The two globs
++        # serve the legacy layout and the sites/ tree during the migration
++        # window; the legacy one is removed in Phase D.
++        files:
++          - path: "mces/*/config.yaml"
++          - path: "sites/*/*/mces/*/config.yaml"
+   template:
+     metadata:
+       name: '{{ .Values.group }}-{{ "{{" }}path.basename{{ "}}" }}'
+       namespace: gitops-{{ .Values.repository }}
++      labels:
++        day2.gitops/team: '{{ .Values.group }}'
++        day2.gitops/env: '{{ "{{" }}env{{ "}}" }}'
++        day2.gitops/site: '{{ "{{" }}site{{ "}}" }}'
++        day2.gitops/mce: '{{ "{{" }}path.basename{{ "}}" }}'
++        day2.gitops/ocp-version: '{{ "{{" }}ocpVersion{{ "}}" }}'
++        day2.gitops/role: mce
+     spec:
 ```
 
-Copy the exact file from the mock commit "Phase B" — the sketch above only
-marks what is new vs frozen. `{{path.basename}}` of the directory containing
-config.yaml equals the old directory-generator basename, so **generated app
-names and destinations are unchanged**.
+☝️ The `namespace:` line inside that hunk is the FROZEN one — it is context,
+not a change. **Both** `files:` globs are required in Phase B: dropping the
+legacy `mces/*/config.yaml` here instead of in Phase D deletes the apps of
+every MCE that has not moved yet.
 
-### `clusters/templates/clustersAppset.yaml` — files generator, parametric
+**1b — pass the new params down** (`spec.template.spec.source.helm.values`):
 
-Generator becomes `files: [path: "{{ .Values.mcePath }}/*/config.yaml"]`
-(the `in-cluster` exclude is obsolete — no config.yaml there). Template
-passes `cluster` (= `{{path.basename}}`), `clusterPath` (= `{{path}}`),
-inherited `env`/`site`, and the **cluster's own** `ocpVersion` (from its
-config.yaml, overriding the MCE's). Labels with `role: hosted-cluster`.
-
-### `clusters/templates/inClusterApp.yaml` — parametric passthrough
-
-Passes `mcePath`, `clusterPath: {{ .Values.mcePath }}/in-cluster`, env/site,
-and `ocpVersion` **unchanged from the MCE's** (no override — in-cluster
-charts version by the MCE's own OCP version). Labels with `role: mce`.
-
-### `operators/templates/operators.yaml` — parametric + version layer
-
-- gen-1 scans `{{ .Values.clusterPath }}/*` (renders byte-identical to the
-  old `mces/<mce>/<cluster>/*` while folders are in the legacy tree).
-- gen-2 (in-cluster defaults) unchanged in this phase.
-- Config valueFiles stack, lowest → highest:
-
-```yaml
-- '$values/operators/<chart>/<chart>.yaml'
-- '$values/operators/<chart>/versions/ocp-{{ .Values.ocpVersion }}/<chart>.yaml'   # NEW
-{{- if in-cluster }}
-- '$values/mces/in-cluster-defaults/<chart>/<chart>.yaml'
-{{- end }}
-- '$values/{{ .Values.clusterPath }}/<chart>/<chart>.yaml'
+```diff
+           values: |
+             group: '{{ .Values.group }}'
+             mce: '{{ "{{" }}path.basename{{ "}}" }}'
++            mcePath: '{{ "{{" }}path{{ "}}" }}'
++            env: '{{ "{{" }}env{{ "}}" }}'
++            site: '{{ "{{" }}site{{ "}}" }}'
++            ocpVersion: '{{ "{{" }}ocpVersion{{ "}}" }}'
+       destination:
+         name: '{{ "{{" }}path.basename{{ "}}" }}'
 ```
 
-- Labels; `role:` is `mce` for in-cluster, else `hosted-cluster`.
+`{{path.basename}}` of the directory containing config.yaml equals the old
+directory-generator basename, so **generated app names and destinations are
+unchanged**. `env` / `site` / `ocpVersion` are appset placeholders resolved
+from the config.yaml fields (Phase D switches env/site to path segments).
 
-### `deploy/templates/deployApp.yaml` — parametric + version/site layers
+### 2. `clusters/templates/clustersAppset.yaml`
 
-Workload valueFiles become (lowest → highest; hub branch first):
+**2a — generator + labels:**
 
-```yaml
-{{- if .Values.hub }}
-- '$values/operators/<op>/values.yaml'
-- '$values/in-cluster/<op>/values.yaml'
-{{- else }}
-- '$values/operators/<op>/values.yaml'
-- '$values/operators/<op>/versions/ocp-{{ .Values.ocpVersion }}/values.yaml'   # NEW
-- '$values/sites/{{ .Values.site }}/values.yaml'                               # NEW
-- '$values/sites/{{ .Values.site }}/{{ .Values.env }}/values.yaml'             # NEW
-{{- if in-cluster }}
-- '$values/mces/in-cluster-defaults/<op>/values.yaml'
-- '$values/mces/in-cluster-defaults/<op>/values-{{ .Values.mce }}.yaml'
-{{- end }}
-- '$values/{{ .Values.mcePath }}/values.yaml'
-- '$values/{{ .Values.clusterPath }}/values.yaml'
-- '$values/{{ .Values.clusterPath }}/{{ .Values.operator }}/values.yaml'
-{{- end }}
+```diff
+     - git:
+         repoURL: <sigs repo URL — unchanged>
+         revision: main
+-        directories:
+-          - path: "mces/{{ .Values.mce }}/*"
+-          - path: "mces/{{ .Values.mce }}/in-cluster"
+-            exclude: true
++        # A hosted cluster is a folder holding a config.yaml (ocpVersion only;
++        # env/site are inherited from the MCE). in-cluster/ and chart folders
++        # have no config.yaml and are invisible — this replaces the old
++        # in-cluster exclude.
++        files:
++          - path: "{{ .Values.mcePath }}/*/config.yaml"
+   template:
+     metadata:
+       name: '{{ .Values.group }}-{{ "{{" }}path.basename{{ "}}" }}'
++      labels:
++        day2.gitops/team: '{{ .Values.group }}'
++        day2.gitops/env: '{{ .Values.env }}'
++        day2.gitops/site: '{{ .Values.site }}'
++        day2.gitops/mce: '{{ .Values.mce }}'
++        day2.gitops/cluster: '{{ "{{" }}path.basename{{ "}}" }}'
++        day2.gitops/ocp-version: '{{ "{{" }}ocpVersion{{ "}}" }}'
++        day2.gitops/role: hosted-cluster
+     spec:
+       project: '{{ .Values.group }}'
+       sources:
 ```
 
-Notes: the hub branch drops the junk `$values/mces//...` empty-mce paths
-(spec-only cleanup); the defaults layers now sit *before* the MCE-wide /
-cluster-wide slots — no behavior change because **no MCE-wide or cluster-wide
-values.yaml exists anywhere today** (verify that in your repos:
-`ls mces/*/values.yaml mces/*/*/values.yaml` → nothing). Everything new
-resolves to nothing until someone creates a file. Name, releaseName,
-destination, syncPolicy logic: untouched. Labels added (hub apps: team,
-chart, `role: hub` only — no env/site/mce/ocp-version).
+**2b — pass clusterPath and the cluster's own version down:**
 
-### `mces/templates/inClusterAppset.yaml` — labels only
+```diff
+             values: |
+               group: '{{ .Values.group }}'
+               mce: {{ .Values.mce }}
++              mcePath: {{ .Values.mcePath }}
+               cluster: '{{ "{{" }}path.basename{{ "}}" }}'
++              clusterPath: '{{ "{{" }}path{{ "}}" }}'
++              env: {{ .Values.env }}
++              site: {{ .Values.site }}
++              ocpVersion: '{{ "{{" }}ocpVersion{{ "}}" }}'
+       destination:
+         name: in-cluster
+```
 
-Add `day2.gitops/team`, `day2.gitops/chart`, `day2.gitops/role: hub` to the
-template metadata. Glob changes come in Phase C'.
+Note the two sources: `env` / `site` are **Helm values inherited from the MCE**
+(`{{ .Values.* }}`), while `ocpVersion` is the **appset placeholder**
+(`{{ocpVersion}}`) read from the *cluster's own* config.yaml — that is what lets
+a hosted cluster sit on a different OCP stream than its MCE.
+
+### 3. `clusters/templates/inClusterApp.yaml`
+
+**3a — labels** (`metadata`, static Application — no generator here):
+
+```diff
+ metadata:
+   name: {{ .Values.group }}-in-cluster
+   namespace: gitops-{{ .Values.group }}
++  labels:
++    day2.gitops/team: '{{ .Values.group }}'
++    day2.gitops/env: '{{ .Values.env }}'
++    day2.gitops/site: '{{ .Values.site }}'
++    day2.gitops/mce: '{{ .Values.mce }}'
++    day2.gitops/cluster: in-cluster
++    # The MCE's own OCP version — in-cluster charts resolve version layers by it.
++    day2.gitops/ocp-version: '{{ .Values.ocpVersion }}'
++    day2.gitops/role: mce
+ spec:
+   project: '{{ .Values.group }}'
+   sources:
+```
+
+**3b — parametric passthrough:**
+
+```diff
+         values: |
+           group: '{{ .Values.group }}'
+           mce: {{ .Values.mce }}
++          mcePath: {{ .Values.mcePath }}
+           cluster: 'in-cluster'
++          clusterPath: {{ .Values.mcePath }}/in-cluster
++          env: {{ .Values.env }}
++          site: {{ .Values.site }}
++          ocpVersion: '{{ .Values.ocpVersion }}'
+   destination:
+     name: in-cluster
+```
+
+`ocpVersion` is passed through **unchanged from the MCE** — deliberately no
+override, since in-cluster charts version by the MCE's own OCP version.
+`clusterPath` is composed, not generated: there is no config.yaml in
+`in-cluster/`.
+
+### 4. `operators/templates/operators.yaml`
+
+**4a — gen-1 becomes parametric.** gen-2 (the in-cluster defaults generator,
+just below) is **unchanged in this phase** — it moves in Phase C'.1:
+
+```diff
+         directories:
+-          - path: "mces/{{ .Values.mce }}/{{ .Values.cluster }}/*"
++          - path: "{{ .Values.clusterPath }}/*"
+     {{- if eq .Values.cluster "in-cluster" }}
+     - git:
+```
+
+While folders are still in the legacy tree, `{{ .Values.clusterPath }}` renders
+`mces/<mce>/<cluster>` — byte-identical to the line it replaces.
+
+**4b — labels:**
+
+```diff
+   template:
+     metadata:
+       name: '{{ .Values.group }}-{{ .Values.cluster }}-{{ "{{" }}path.basename{{ "}}" }}'
++      labels:
++        day2.gitops/team: '{{ .Values.group }}'
++        day2.gitops/env: '{{ .Values.env }}'
++        day2.gitops/site: '{{ .Values.site }}'
++        day2.gitops/mce: '{{ .Values.mce }}'
++        day2.gitops/cluster: '{{ .Values.cluster }}'
++        day2.gitops/chart: '{{ "{{" }}path.basename{{ "}}" }}'
++        day2.gitops/ocp-version: '{{ .Values.ocpVersion }}'
++        day2.gitops/role: {{ eq .Values.cluster "in-cluster" | ternary "mce" "hosted-cluster" }}
+     spec:
+       project: '{{ .Values.group }}'
+```
+
+**4c — passthrough + the config stack's new version layer:**
+
+```diff
+             values: |
+               group: '{{ .Values.group }}'
+               mce: {{ .Values.mce }}
++              mcePath: {{ .Values.mcePath }}
+               cluster: {{ .Values.cluster }}
++              clusterPath: {{ .Values.clusterPath }}
++              env: {{ .Values.env }}
++              site: {{ .Values.site }}
++              ocpVersion: '{{ .Values.ocpVersion }}'
+               operator: {{ "{{" }}path.basename{{ "}}" }}
++            # Deploy-config stack, lowest -> highest: team default, per-OCP-stream
++            # pin (selected by the destination's own ocpVersion), fleet defaults,
++            # the cluster's own folder. All optional (ignoreMissingValueFiles).
+             valueFiles:
+               - '$values/operators/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
++              - '$values/operators/{{ "{{" }}path.basename{{ "}}" }}/versions/ocp-{{ .Values.ocpVersion }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+               {{- if eq .Values.cluster "in-cluster" }}
+               - '$values/mces/in-cluster-defaults/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+               {{- end }}
+-              - '$values/mces/{{ .Values.mce }}/{{ .Values.cluster }}/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
++              - '$values/{{ .Values.clusterPath }}/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+```
+
+### 5. `deploy/templates/deployApp.yaml`
+
+**5a — labels.** Hub apps get team/chart/role only — no env/site/mce/ocp-version
+(the prod-hub is version-less and outside the `sites/` tree):
+
+```diff
+   name: {{ .Values.group }}-{{ .Values.cluster }}-{{ .Values.operator }}-deploy
+   {{- end }}
+   namespace: gitops-{{ .Values.group }}
++  labels:
++    day2.gitops/team: '{{ .Values.group }}'
++    day2.gitops/chart: '{{ .Values.operator }}'
++    {{- if .Values.hub }}
++    day2.gitops/role: hub
++    {{- else }}
++    day2.gitops/env: '{{ .Values.env }}'
++    day2.gitops/site: '{{ .Values.site }}'
++    day2.gitops/mce: '{{ .Values.mce }}'
++    day2.gitops/cluster: '{{ .Values.cluster }}'
++    day2.gitops/ocp-version: '{{ .Values.ocpVersion }}'
++    day2.gitops/role: {{ eq .Values.cluster "in-cluster" | ternary "mce" "hosted-cluster" }}
++    {{- end }}
+ spec:
+   project: '{{ .Values.group }}'
+```
+
+**5b — the workload stack splits into a hub branch and a fleet branch.** This is
+the largest hunk; replace it as a block rather than line by line:
+
+```diff
+         ignoreMissingValueFiles: true
++        # Workload-values stack, lowest -> highest. Every layer is optional.
+         valueFiles:
++          {{- if .Values.hub }}
++          - '$values/operators/{{ .Values.operator }}/values.yaml'
++          - '$values/in-cluster/{{ .Values.operator }}/values.yaml'
++          {{- else }}
+           - '$values/operators/{{ .Values.operator }}/values.yaml'
+-          - '$values/mces/{{ .Values.mce }}/values.yaml'
+-          - '$values/mces/{{ .Values.mce }}/{{ .Values.cluster }}/values.yaml'
+-          {{- if and (eq .Values.cluster "in-cluster") (not .Values.hub) }}
++          - '$values/operators/{{ .Values.operator }}/versions/ocp-{{ .Values.ocpVersion }}/values.yaml'
++          - '$values/sites/{{ .Values.site }}/values.yaml'
++          - '$values/sites/{{ .Values.site }}/{{ .Values.env }}/values.yaml'
++          {{- if eq .Values.cluster "in-cluster" }}
+           - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values.yaml'
+           - '$values/mces/in-cluster-defaults/{{ .Values.operator }}/values-{{ .Values.mce }}.yaml'
+           {{- end }}
+-          - '$values/mces/{{ .Values.mce }}/{{ .Values.cluster }}/{{ .Values.operator }}/values.yaml'
+-          {{- if .Values.hub }}
+-          - '$values/in-cluster/{{ .Values.operator }}/values.yaml'
++          - '$values/{{ .Values.mcePath }}/values.yaml'
++          - '$values/{{ .Values.clusterPath }}/values.yaml'
++          - '$values/{{ .Values.clusterPath }}/{{ .Values.operator }}/values.yaml'
+           {{- end }}
+```
+
+Three things worth understanding before you paste it:
+
+- The inner `{{- if ... }}` loses its `(not .Values.hub)` guard because it now
+  lives inside the `{{- else }}` (non-hub) branch. The trailing `{{- end }}`
+  in the context closes that new `if/else`, not the inner one.
+- The hub branch drops the junk `$values/mces//...` empty-mce paths
+  (spec-only cleanup — they never resolved).
+- The `in-cluster-defaults` layers now sit *before* the MCE-wide and
+  cluster-wide slots. No behavior change, because **no MCE-wide or
+  cluster-wide values.yaml exists anywhere today** — verify in your repos with
+  `ls mces/*/values.yaml mces/*/*/values.yaml` → nothing. Everything new
+  resolves to nothing until someone creates a file.
+
+Name, releaseName, destination and syncPolicy logic: untouched.
+
+### 6. `mces/templates/inClusterAppset.yaml`
+
+Labels only — six lines. The glob changes come in Phase C'.1:
+
+```diff
+   template:
+     metadata:
+       name: '{{ .Values.group }}-in-cluster-{{ "{{" }}path.basename{{ "}}" }}'
++      labels:
++        day2.gitops/team: '{{ .Values.group }}'
++        day2.gitops/chart: '{{ "{{" }}path.basename{{ "}}" }}'
++        # No env/site/mce/ocp-version labels: the prod-hub is version-less and
++        # outside the sites/ tree.
++        day2.gitops/role: hub
+     spec:
+       project: '{{ .Values.group }}'
+       sources:
+```
 
 **Gate:** render harness IDENTITY OK — all existing apps byte-identical in
 identity and resolution; only labels + valueFiles-list strings differ.
