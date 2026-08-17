@@ -35,16 +35,19 @@ defaults/
    every MCE hub.** Never create non-chart directories here (docs, scripts,
    ...). Plain files (like this README) are ignored by the directory
    generator and are safe.
-4. **This folder can never be mistaken for an MCE**: MCEs are discovered by
-   their `config.yaml` (files generator) — this folder has none. No exclude
-   rules are needed anywhere.
+4. **This folder can never be mistaken for an MCE**: MCEs are the folders
+   matching `sites/*/*/mces/*` — a `directories:` glob, where `*` matches
+   exactly one path segment, so cluster discovery never leaves the `sites/`
+   subtree. No exclude rules are needed anywhere, and no file you put here
+   can change that (there are no marker files any more — see the team
+   README).
 5. **`repourl` is all-lowercase** — that is the key `deployApp.yaml` reads.
 6. **Leave `targetRevision` out of the deploy config here if the chart should
-   follow per-OCP-stream pins.** This file sits ABOVE the
+   follow per-OCP-version pins.** This file sits ABOVE the
    `operators/<chart>/versions/ocp-<v>/` layer in the config stack, so a
-   `targetRevision` written here overrides every stream pin silently.
+   `targetRevision` written here overrides every version pin silently.
    (`dhcp-api-token` currently pins `main` here — intentional, but it means
-   stream pins for it are inert until that line moves to `operators/`.)
+   version pins for it are inert until that line moves to `operators/`.)
 
 ## How it is wired
 
@@ -67,8 +70,9 @@ two locations is an in-place no-op update, never a delete/recreate.
 ## Values precedence (lowest to highest)
 
 1. `operators/<chart>/values.yaml` — chart, team-wide
-2. `operators/<chart>/versions/ocp-<v>/values.yaml` — chart, per OCP stream
-   (`<v>` = the MCE's own OCP version, from its `config.yaml`)
+2. `operators/<chart>/versions/ocp-<v>/values.yaml` — chart, per OCP version
+   (`<v>` = the MCE's own OCP version, resolved at render time from the day1
+   repo's `mastertag` — the **full** patch version, e.g. `ocp-4.16.27`)
 3. `sites/<site>/values.yaml` — site-wide
 4. `sites/<site>/<env>/values.yaml` — site + env
 5. `defaults/mces/<chart>/values.yaml` — chart, every MCE in-cluster

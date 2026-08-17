@@ -5,8 +5,11 @@ This hand-off migrates the day2 repos to the architecture in
 
 - `sites/<site>/<env>/mces/<mce>/<cluster>/` tree — env and site become path
   identity; fleet queries become greps and label selectors.
-- `config.yaml` per MCE/cluster carrying **`ocpVersion`** — the only version
-  key; cluster and MCE upgrades become one-line edits, never folder moves.
+- ~~a marker file per MCE/cluster (`mce.yaml` / `hc.yaml`, see §0) carrying
+  **`ocpVersion`**~~ — **superseded by Phase E**: the version is read from the
+  day1 repo's `mastertag`, the sigs repos declare no version at all, and the
+  marker files are deleted. Discovery is by folder existence. An upgrade is one
+  edit in day1 for the whole fleet, never a folder move.
 - `operators/<chart>/versions/ocp-<v>/` — per-OCP-stream chart pins and
   values; fleet chart upgrades become one-line pin edits.
 - `defaults/{hub,mces,hosted-clusters}/` — the three deploy-once fleet
@@ -19,11 +22,256 @@ This hand-off migrates the day2 repos to the architecture in
 Helm-render verified, **not live-verified**: `helm template` does not execute
 git generators; the offline harness (`tools/render-verify/render_chain.py`,
 copy it across; it hardcodes `GROUP = "redbull"` near the top — set it to the
-team whose repo you are verifying) simulates the documented generator params
+team whose repo you are verifying, and from Phase E on it also needs a day1
+checkout: `--day1 ROOT`, defaulting to `../gitops-day1/platform-config`)
+simulates the documented generator params
 and asserts, per phase, that all 35 generated apps keep identical names, destinations,
 releaseNames, syncPolicies and identical *resolved value-file content
 sequences*. Re-run it against your repos at every phase gate; re-verify
 against live Argo behavior on the first phase you apply.
+
+---
+
+## §0 — ERRATA (2026-08-17): the marker file is `mce.yaml` / `hc.yaml`
+
+**If you have already applied Phase B, read this section before doing
+anything else — then read "Air-gap continuation" below, which trims this
+section's fix to steps 1–2 and folds step 3 into Phase E.** The original
+hand-off used one filename, `config.yaml`, at
+both MCE and hosted-cluster depth. That is wrong and it fails in production.
+Everything below in this document has been corrected to the two names; this
+section explains the failure and how to get from the shipped state to the
+corrected one without an outage.
+
+### 0.1 What it looks like
+
+Argo on prod-hub reports, once per hosted cluster:
+
+> `there are no clusters with this name: <hosted-cluster-name>`
+
+and `gitops-<group>` on prod-hub carries one extra Application per hosted
+cluster, named `<group>-<hosted-cluster>`. The fingerprint is an **MCE-layer
+app whose destination is a hosted cluster**:
+
+```console
+$ kubectl get application <group>-<hosted-cluster> -n gitops-<group> \
+    -o jsonpath='{.spec.destination.name}{"  src="}{.spec.source.path}{"\n"}'
+<hosted-cluster>  src=clusters      # destination should be an MCE; src=clusters means
+                                    # this was emitted by mcesAppset, not clustersAppset
+```
+
+### 0.2 Why — a `files:` glob is not depth-exact
+
+Phase B switched MCE and hosted-cluster discovery from a `directories:`
+generator to a `files:` generator. **The two are matched by different
+engines**, and only one of them stops at `/`:
+
+| Generator | Matched by | Does `*` cross `/`? |
+|---|---|---|
+| `directories:` | Go `path.Match`, in the appset controller | **No** — exactly one path segment |
+| `files:` | `git ls-files -- <pattern>` on the repo-server | **Yes** — matches at any depth |
+
+A `files:` path is a **git pathspec**, and git matches pathspecs with
+wildmatch *without* `WM_PATHNAME`, so `*` eats slashes. `mces/*/config.yaml`
+therefore does not mean "a config.yaml one level under `mces/`" — it means
+"any config.yaml at any depth under `mces/`", which is every hosted cluster
+as well. Each extra hit renders an MCE-layer Application with
+`destination.name: {{path.basename}}` = a hosted-cluster name, which prod-hub
+cannot resolve.
+
+Check any team repo yourself, with the same command the repo-server runs —
+and note that **your shell disagrees with git here**, which is exactly why
+this was missed:
+
+```console
+$ ls mces/*/config.yaml            # shell globs stop at '/' — looks correct
+mces/ocp4-prod-mce-site1-a/config.yaml
+
+$ git ls-files -- 'mces/*/config.yaml'                 # what Argo actually sees
+mces/ocp4-prod-mce-site1-a/config.yaml                       # intended
+mces/ocp4-prod-mce-site1-a/ocp4-prod-herzi-site1/config.yaml # phantom MCE
+mces/ocp4-prod-mce-site1-a/ocp4-prod-karniol-site1/config.yaml
+```
+
+**Phase D does not fix this.** `sites/*/*/mces/*/config.yaml` over-matches
+identically — same command, same result, one level deeper. Worse, `{{path[1]}}`
+and `{{path[2]}}` shift by one segment on the over-matched hits, so the Phase D
+env/site labels would be wrong on them too.
+
+### 0.3 Blast radius — do not roll back
+
+- **Real MCE apps are correct.** The glob over-matches; it never misses.
+- **The phantoms never synced.** They fail at destination resolution, so
+  nothing was deployed anywhere it shouldn't be, and there is nothing to
+  clean up on any cluster.
+- **They delete themselves** once the glob stops matching them (0.4).
+- **The one genuine hazard:** a phantom is harmless only because its
+  destination fails to resolve. A marker file dropped into an `in-cluster/`
+  folder resolves to `in-cluster` — a real cluster — and prod-hub would then
+  sync the `clusters` chart against itself with a hosted-cluster path. Treat
+  "never a marker file in `in-cluster/` or a chart folder" as a hard rule,
+  not a tidiness preference.
+
+### 0.4 The fix, and the order to apply it
+
+Depth cannot be expressed in a `files:` glob, so it is expressed in the
+**filename**: `mce.yaml` in MCE folders, `hc.yaml` in hosted-cluster folders.
+Neither name exists at any other depth, so neither glob can over-match no
+matter how `*` behaves. Same schema, same keys — only the name changes.
+
+> Rejected alternative: `applicationsetcontroller.enable.new.git.file.globbing:
+> "true"` makes `files:` globs depth-exact and would need no repo changes. It
+> defaults to off, and `clustersAppset` runs on **every MCE's** Argo — the
+> whole fleet, including every future MCE, would have to carry the flag
+> forever or silently regress to phantoms. Unique filenames need no
+> cluster-side configuration.
+
+**This is add-before-remove — the ONE INVARIANT applies.** Never rename the
+marker in the sigs repo before the platform globs point at the new name: for
+the window in between, the live glob would match nothing and every
+`<group>-<mce>` app would be deleted (workloads orphaned).
+
+**Step 1 — sigs repos, one commit per team: add the new markers *alongside*
+the old ones.** `cp`, not `git mv`. Nothing globs the new names yet, so this
+has zero effect. In the legacy layout (`sites/` not yet applied — shell globs
+are depth-exact, so these are safe as written):
+
+```console
+for f in mces/*/config.yaml;   do cp "$f" "$(dirname "$f")/mce.yaml"; done
+for f in mces/*/*/config.yaml; do cp "$f" "$(dirname "$f")/hc.yaml";  done
+git add -A && git commit -m "add mce.yaml/hc.yaml markers alongside config.yaml"
+```
+
+For a repo already moved to `sites/` (post-Phase-C), the same two lines with
+`sites/*/*/mces/*` and `sites/*/*/mces/*/*`. Keep the content byte-identical,
+`env`/`site` fields included — the whole point is that nothing about the
+generated apps changes.
+
+> **The harness gate is red at this step, and that is correct.** With the new
+> harness and the platform still on `config.yaml`, `render_chain.py` reports
+> `DEPTH-AMBIGUOUS files: glob` and exits non-zero — it is detecting the live
+> bug, not a mistake in your step 1. Expect it until step 2 merges; the
+> standing "require IDENTITY OK before merging" gate applies from step 2 on.
+
+**Step 2 — platform repo, ONE MR: point every `files:` glob at the new
+names.** Two files, and both globs in `mcesAppset.yaml`:
+
+```diff
+  # mces/templates/mcesAppset.yaml
+         files:
+-          - path: "mces/*/config.yaml"
+-          - path: "sites/*/*/mces/*/config.yaml"
++          - path: "mces/*/mce.yaml"
++          - path: "sites/*/*/mces/*/mce.yaml"
+
+  # clusters/templates/clustersAppset.yaml
+         files:
+-          - path: "{{ .Values.mcePath }}/*/config.yaml"
++          - path: "{{ .Values.mcePath }}/*/hc.yaml"
+```
+
+Because the marker contents are identical, every real app keeps its name,
+destination, params and value-file resolution — the only change is that the
+phantoms stop being generated and the appset controller removes them.
+**Gate:** harness IDENTITY OK, and `git ls-files -- '<each new glob>'` in a
+team repo returns *only* the intended depth.
+
+**Step 3 — sigs repos, one commit per team: delete the old markers.** Only
+after step 2 has merged and the phantoms are gone.
+
+```console
+find . -name config.yaml -path '*mces/*' -delete   # or: git rm mces/*/config.yaml mces/*/*/config.yaml
+```
+
+**Verify** on prod-hub — the phantom apps are gone and every remaining
+MCE-layer app targets an MCE:
+
+```console
+kubectl get applications -n gitops-<group> \
+  -l day2.gitops/role=mce -o custom-columns=NAME:.metadata.name,DEST:.spec.destination.name
+```
+
+If any phantom Application survives (an appset configured with
+`preserveResourcesOnDeletion`, or one that was adopted manually), delete the
+Application CR directly — non-cascading, since it never synced anything.
+
+**Where this leaves you:** step 3 completes a corrected Phase B. Resume the
+main path at Phase C below, which is written against the corrected marker
+names and needs no further adjustment.
+
+### 0.5 Standing rule
+
+> **Never use one marker filename at two depths, and never assume a `files:`
+> glob is anchored.** Before merging any change to a `files:` generator, run
+> `git ls-files -- '<the glob>'` in a real team repo and read the whole
+> output. `render_chain.py` now models both engines and fails the pre-merge
+> gate on any `files:` glob whose git-pathspec matches differ from its
+> depth-exact matches, so this cannot reach an MR again.
+
+---
+
+## Air-gap continuation (2026-08-17) — you are after Phase B
+
+**Read this if the air-gapped repos have Phase A and Phase B applied under the
+original `config.yaml` marker name and the §0 rename never ran.** That is the
+current air-gap state, and it means two things at once: the phantom MCE
+Applications of §0.1 are live in your fleet right now, and the rest of this
+document (C, C', D) is written against marker names you do not have.
+
+**Phase E supersedes most of what is left.** It takes the OCP version out of
+the sigs repos entirely — it comes from the day1 repo's `mastertag` — which
+leaves the marker files with nothing to carry, so they are deleted and
+discovery goes back to depth-exact `directories:` generators. The §0 rename and
+all of Phase D become work you would throw away.
+
+**The remaining sequence is `§0 (steps 1–2 only) → C → C' → E`. Phase D is
+skipped.**
+
+| Phase | Status for the air-gap | Why |
+|---|---|---|
+| §0 steps 1–2 | **do, trimmed** (below) | closes the live phantom window; the new markers are throwaway, the window is not |
+| §0 step 3 (delete `config.yaml`) | **fold into E.3** | E.3 deletes every marker anyway — one pass over the sigs repos instead of two |
+| Phase C (trees → `sites/`) | **required, unchanged** | E builds the day1 lookup from `path[1]` = site; the legacy `mces/<mce>/` layout has no site segment, and the harness now refuses that layout outright |
+| Phase C' (defaults renames + hosted-clusters layer) | **required, unchanged** | independent of the version change |
+| Phase D (drop legacy glob; env/site from path; strip marker fields) | **skip — subsumed by E** | E.2 replaces the generator wholesale with one `sites/` `directories:` entry, env/site already from `path[1]`/`path[2]`; E.3 deletes the markers instead of editing their fields; D.2's README refresh is E.4 |
+| Phase E | **the new end state** | versions from day1, markers deleted |
+
+### The §0 trim
+
+Apply §0.4 **step 1** (add `mce.yaml`/`hc.yaml` alongside `config.yaml`) and
+**step 2** (the platform MR pointing both globs at the new names) exactly as
+written — in the legacy layout, since Phase C has not run yet. Then **stop**.
+Do not run step 3: leave `config.yaml` in place, nothing globs it once step 2
+merges, and E.3 removes both names in one commit per team.
+
+Why bother, when E deletes these markers anyway: C and C' are per-team,
+per-MCE tree moves and will take a while. §0.3 rates the phantoms harmless —
+they never synced and nothing needs cleaning up — with **one genuine hazard**,
+a marker file that lands in an `in-cluster/` or chart folder, where the
+destination resolves to a real cluster instead of failing. Running the whole
+tree-move migration with a live over-matching glob is how that hazard gets
+created by accident.
+
+**If you would rather skip §0 entirely** and go straight to C → C' → E,
+that is defensible only after confirming the hazard is not already present,
+in every team repo:
+
+```console
+$ git ls-files -- 'mces/*/config.yaml'      # what mcesAppset actually matches
+```
+
+Every hit must be at MCE depth (`mces/<mce>/config.yaml`) or hosted-cluster
+depth (`mces/<mce>/<hc>/config.yaml`). A hit under `in-cluster/` or a chart
+folder is the hazard — fix that before anything else. Re-run the check after
+every commit of Phase C, because the glob keeps over-matching until E.2 lands.
+
+### Do not try to shortcut C by going straight to E
+
+E's generator is `sites/*/*/mces/*` and its day1 path is built from
+`path[1]`/`path[2]`. There is no legacy-layout form of it: `mces/<mce>/` has no
+site segment to read, so no day1 file can be located from it. `render_chain.py`
+fails the gate on sight of a legacy marker for exactly this reason. Phase C is
+a hard precondition for Phase E.
 
 ---
 
@@ -71,14 +319,21 @@ post-merge inspection window.
 
 ---
 
-## Phase A — sigs repos: add config.yaml (additive, zero effect)
+## Phase A — sigs repos: add the marker files (additive, zero effect)
+
+> **Partly superseded by Phase E.** The marker files are deleted in E.3 and the
+> version inventory below is no longer kept in the sigs repos at all — day1's
+> `mastertag` is the source. If you have not applied Phase A yet, you still
+> need it (Phase B's generators read the markers until E.2 lands); what you no
+> longer need to get *right* is `ocpVersion`, since E stops reading it. The
+> inventory is still worth doing once, as the E.0 parity check against day1.
 
 **Per team repo.** First, inventory the fleet: collect the real OCP version of
 every MCE and every hosted cluster. The value is load-bearing, not
 decorative — it selects the `operators/<chart>/versions/ocp-<v>/` layers once
 Phase B lands. Then add:
 
-`mces/<mce>/config.yaml` (every MCE):
+`mces/<mce>/mce.yaml` (every MCE):
 
 ```yaml
 env: prod            # this MCE's env: prod | prep | test   ┐ needed only until
@@ -86,15 +341,16 @@ site: five           # this MCE's site                      ┘ Phase D
 ocpVersion: "4.20"   # the MCE's OWN OCP version. ALWAYS quote — 4.20 unquoted is the float 4.2
 ```
 
-`mces/<mce>/<cluster>/config.yaml` (every hosted cluster):
+`mces/<mce>/<cluster>/hc.yaml` (every hosted cluster):
 
 ```yaml
 ocpVersion: "4.20"   # the cluster's OWN version. NEVER env/site here — inherited from the MCE
 ```
 
-Do **not** create a config.yaml in `mces/in-cluster-defaults/` or in any
+Do **not** create either marker in `mces/in-cluster-defaults/` or in any
 `in-cluster/` or chart folder — presence of the file is what will make a
-folder an MCE/cluster.
+folder an MCE/cluster, and an `in-cluster/` marker resolves to a *real*
+destination (§0.3). Do **not** use one name at both depths (§0).
 
 Plain files are invisible to the current directory generators — this phase
 changes nothing anywhere (mock: verified zero diff, not even a spec change).
@@ -104,7 +360,7 @@ changes nothing anywhere (mock: verified zero diff, not even a spec change).
 ## Phase B — platform repo: ONE MR (generators + parametric paths + labels)
 
 > ⚠️ **HARD PRECONDITION: every team repo has completed Phase A before this
-> merges.** A team without config.yaml files at switch time gets its
+> merges.** A team without marker files at switch time gets its
 > `<group>-<mce>` apps deleted (workloads orphaned in place, unmanaged until
 > the files are added and the same-named apps recreate and re-adopt).
 
@@ -152,14 +408,17 @@ your files.
 -          - path: "mces/*"
 -          - path: "mces/in-cluster-defaults"
 -            exclude: true
-+        # An MCE is a folder holding a config.yaml (env, site, ocpVersion).
++        # An MCE is a folder holding an mce.yaml (env, site, ocpVersion).
 +        # Folders without one (in-cluster-defaults, docs, ...) are invisible —
 +        # this replaces the old in-cluster-defaults exclude. The two globs
 +        # serve the legacy layout and the sites/ tree during the migration
 +        # window; the legacy one is removed in Phase D.
++        #
++        # '*' CROSSES '/' here (git pathspec — §0): what keeps this off the
++        # hosted clusters is that their marker is named hc.yaml, not the glob.
 +        files:
-+          - path: "mces/*/config.yaml"
-+          - path: "sites/*/*/mces/*/config.yaml"
++          - path: "mces/*/mce.yaml"
++          - path: "sites/*/*/mces/*/mce.yaml"
    template:
      metadata:
        name: '{{ .Values.group }}-{{ "{{" }}path.basename{{ "}}" }}'
@@ -176,7 +435,7 @@ your files.
 
 ☝️ The `namespace:` line inside that hunk is the FROZEN one — it is context,
 not a change. **Both** `files:` globs are required in Phase B: dropping the
-legacy `mces/*/config.yaml` here instead of in Phase D deletes the apps of
+legacy `mces/*/mce.yaml` here instead of in Phase D deletes the apps of
 every MCE that has not moved yet.
 
 **1b — pass the new params down** (`spec.template.spec.source.helm.values`):
@@ -193,10 +452,10 @@ every MCE that has not moved yet.
          name: '{{ "{{" }}path.basename{{ "}}" }}'
 ```
 
-`{{path.basename}}` of the directory containing config.yaml equals the old
+`{{path.basename}}` of the directory containing `mce.yaml` equals the old
 directory-generator basename, so **generated app names and destinations are
 unchanged**. `env` / `site` / `ocpVersion` are appset placeholders resolved
-from the config.yaml fields (Phase D switches env/site to path segments).
+from the marker's fields (Phase D switches env/site to path segments).
 
 ### 2. `clusters/templates/clustersAppset.yaml`
 
@@ -210,12 +469,13 @@ from the config.yaml fields (Phase D switches env/site to path segments).
 -          - path: "mces/{{ .Values.mce }}/*"
 -          - path: "mces/{{ .Values.mce }}/in-cluster"
 -            exclude: true
-+        # A hosted cluster is a folder holding a config.yaml (ocpVersion only;
++        # A hosted cluster is a folder holding an hc.yaml (ocpVersion only;
 +        # env/site are inherited from the MCE). in-cluster/ and chart folders
-+        # have no config.yaml and are invisible — this replaces the old
-+        # in-cluster exclude.
++        # have no hc.yaml and are invisible — this replaces the old
++        # in-cluster exclude. The MCE's own marker is mce.yaml, so this glob
++        # cannot climb back up to it (§0).
 +        files:
-+          - path: "{{ .Values.mcePath }}/*/config.yaml"
++          - path: "{{ .Values.mcePath }}/*/hc.yaml"
    template:
      metadata:
        name: '{{ .Values.group }}-{{ "{{" }}path.basename{{ "}}" }}'
@@ -250,7 +510,7 @@ from the config.yaml fields (Phase D switches env/site to path segments).
 
 Note the two sources: `env` / `site` are **Helm values inherited from the MCE**
 (`{{ .Values.* }}`), while `ocpVersion` is the **appset placeholder**
-(`{{ocpVersion}}`) read from the *cluster's own* config.yaml — that is what lets
+(`{{ocpVersion}}`) read from the *cluster's own* `hc.yaml` — that is what lets
 a hosted cluster sit on a different OCP stream than its MCE.
 
 ### 3. `clusters/templates/inClusterApp.yaml`
@@ -293,7 +553,7 @@ a hosted cluster sit on a different OCP stream than its MCE.
 
 `ocpVersion` is passed through **unchanged from the MCE** — deliberately no
 override, since in-cluster charts version by the MCE's own OCP version.
-`clusterPath` is composed, not generated: there is no config.yaml in
+`clusterPath` is composed, not generated: there is no marker file in
 `in-cluster/`.
 
 ### 4. `operators/templates/operators.yaml`
@@ -463,7 +723,7 @@ git mv mces/<mce> sites/<site>/<env>/mces/<mce>
 - One MCE per commit; each commit is atomic (never copy-then-delete across
   commits — transient duplicate generator entries are undefined behavior).
 - Mixed states are fine: the mock verified one MCE migrated + one legacy with
-  zero identity diffs; the two globs serve both layouts and config.yaml
+  zero identity diffs; the two globs serve both layouts and the marker files
   env/site stay authoritative during the window.
 - App names contain no path segments → the appset controller updates every
   app **in place**; the only spec diffs are valueFiles path strings
@@ -531,26 +791,249 @@ legacy valueFiles paths. Spec-only cleanup.
 
 ## Phase D — cleanup (platform first, then sigs)
 
+> **Superseded by Phase E — skip this phase.** E.2 replaces the generator
+> wholesale (one `sites/` `directories:` entry, env/site already from
+> `path[1]`/`path[2]`, no legacy glob left to drop), and E.3 deletes the marker
+> files instead of editing their fields. D.2's README refresh is E.4. Kept here
+> for repos that applied D before E existed.
+
 ### D.1 — platform: drop the legacy glob; env/site from path
 
-`mcesAppset.yaml`: remove the `mces/*/config.yaml` files entry; switch
+`mcesAppset.yaml`: remove the `mces/*/mce.yaml` files entry; switch
 env/site sourcing to path segments — `site: {{ "{{" }}path[1]{{ "}}" }}`,
 `env: {{ "{{" }}path[2]{{ "}}" }}` (in both the labels and the values block).
 The depth-exact glob makes path positions trustworthy.
 
 **Order matters: this template change merges BEFORE D.2** — removing a
-config.yaml field the template still reads would leave literal `{{env}}`
+marker field the template still reads would leave literal `{{env}}`
 placeholders in rendered specs (fasttemplate keeps unmatched placeholders).
 
-### D.2 — sigs: strip env/site from every MCE config.yaml
+### D.2 — sigs: strip env/site from every MCE marker file
 
 End-state schema is `ocpVersion` only, identical at MCE and cluster level.
 Refresh the READMEs from the mock: team-repo root README (tree contract,
-naming rules, config.yaml contract, precedence tables), `defaults/hub/`,
+naming rules, marker-file contract, precedence tables), `defaults/hub/`,
 `defaults/mces/`, `defaults/hosted-clusters/`.
 
-**Gate:** harness IDENTITY OK, and `grep -r "env:" sites/*/*/mces/*/config.yaml`
+**Gate:** harness IDENTITY OK, and `grep -r "env:" sites/*/*/mces/*/mce.yaml`
 returns nothing.
+
+---
+
+## Phase E — versions from day1, markers deleted (2026-08-17)
+
+The air-gap runs **5 sig repos**. Every one of them declared `ocpVersion` for
+the same physical clusters, so one cluster upgrade was five identical edits in
+five repos, each able to drift from the others. The day1 repo
+(`gitops-day1/platform-config`) provisioned those clusters and already records
+their exact version as `mastertag`. Phase E makes that the single source: the
+sigs repos declare no version at all, and an upgrade is **one edit in day1 for
+the whole fleet**.
+
+With `ocpVersion` gone, `mce.yaml`/`hc.yaml` have nothing left to carry — they
+existed only to hold that key as generator data. So they are deleted, and
+discovery goes back to `directories:` generators. That is a **safety upgrade,
+not a regression**: `directories:` is matched by Go `path.Match` where `*` stops
+at `/`, so depth-exactness comes from the engine instead of from a marker-naming
+convention. The §0 hazard cannot recur — there is no `files:` glob left in the
+discovery path.
+
+**Where the version enters and where it is derived**
+
+| Layer | How it gets `mastertag` | Day1 file |
+|---|---|---|
+| per-MCE app (mcesAppset) | `$day1` valueFile on the clusters-chart source | `sites/<site>/mces/<mce>/values.yaml` |
+| per-hosted-cluster app (clustersAppset) | `$day1` valueFile on the operators-chart source | `sites/<site>/mces/<mce>/hostedClusters/<cluster>.yaml` |
+| MCE in-cluster (`inClusterApp`) | passed inline from the clusters chart | — (the MCE's, above) |
+
+**Mind the path mapping: the day1 tree has no `<env>` level.** day2
+`sites/<site>/<env>/mces/<mce>` maps to day1 `sites/<site>/mces/<mce>` — env
+lives only inside the resource name. A hosted cluster's day1 filename is its
+day2 folder name plus `.yaml`.
+
+Derivation happens in exactly two templates: strip the arch at the first `-`
+and use the rest **verbatim** — `4.16.27-x86_64` → `ocpVersion: 4.16.27`. It is
+the full patch version, not the stream, so `versions/ocp-<v>/` layers are now
+per-exact-version (see the failure table: this sharpens the layer-before-flip
+rule to *every* upgrade, z-streams included).
+
+### E.0 — preconditions (verify all four before E.2)
+
+1. **Phases C and C' are complete** in every team repo. Phase C is a hard
+   precondition (see the continuation section above). Phase D is skipped.
+2. **Day1 parity.** Every MCE and hosted-cluster folder in every sigs repo has
+   a day1 file at the mapped path carrying a `mastertag` of the form
+   `<major>.<minor>.<patch>[-<arch>]`, and that version agrees with what the
+   cluster is actually running. `render_chain.py` proves the parity offline —
+   it fails per folder with the exact day1 path it expected.
+3. **Argo can read the day1 repo.** A credential for
+   `gitops-day1/platform-config` must exist on **prod-hub's Argo and on every
+   MCE's Argo** — the per-hosted-cluster apps resolve `$day1` on the MCE's
+   repo-server, not on prod-hub. Also confirm the AppProject `<group>` permits
+   that repoURL in `sourceRepos`; it is rendered from the separate
+   `helm-charts/argo-appproject` repo, so a restrictive list needs a
+   coordinated MR **first**.
+4. **Key-collision audit of the real day1 files.** Only the keys named in each
+   template's inline `values:` block are precedence-protected (Argo applies
+   `helm.values` after `valueFiles`). Any *other* top-level key in a day1 file
+   silently becomes a chart value. Grep every day1 `values.yaml` and
+   `hostedClusters/*.yaml` for the platform's vocabulary:
+
+```console
+$ grep -rnE '^(group|mce|mcePath|cluster|clusterPath|env|site|hub|operator):' sites/
+```
+
+   Any hit needs handling before E.2. The dangerous one is `hub:` — a truthy
+   value flips the `{{- else if not .Values.hub }}` branch in
+   `operators.yaml` and silently drops the `defaults/hosted-clusters` generator
+   for that cluster. (In the mock, day1 files carry only `dhcp_values` and
+   `mastertag`, both inert.)
+
+### E.1 — day1 repo: nothing to change, only to confirm
+
+Phase E reads day1; it never writes to it. If precondition 2 turns up a cluster
+day1 does not know about, add its file there **before** E.2 — after E.2 a
+missing day1 entry is a hard render failure for that cluster's apps.
+
+### E.2 — platform repo: ONE MR (4 files)
+
+**`mces/templates/mcesAppset.yaml`** — folder discovery, day1 source, and the
+label that can no longer be populated:
+
+```diff
+-        # An MCE is a folder holding an mce.yaml (ocpVersion). Folders without
+-        # one are invisible to this generator. [...]
+-        files:
+-          - path: "sites/*/*/mces/*/mce.yaml"
++        directories:
++          - path: "sites/*/*/mces/*"
+   template:
+     [...]
+         day2.gitops/mce: '{{ "{{" }}path.basename{{ "}}" }}'
+-        day2.gitops/ocp-version: '{{ "{{" }}ocpVersion{{ "}}" }}'
+         day2.gitops/role: mce
+     spec:
+       project: '{{ .Values.group }}'
+-      source:
+-        repoURL: '[...]/argocd-day2-platform.git'
+-        targetRevision: main
+-        path: clusters
+-        helm:
+-          ignoreMissingValueFiles: true
+-          values: |
+-            [...]
+-            ocpVersion: '{{ "{{" }}ocpVersion{{ "}}" }}'
++      sources:
++        - repoURL: '[...]/argocd-day2-platform.git'
++          targetRevision: main
++          path: clusters
++          helm:
++            ignoreMissingValueFiles: true
++            valueFiles:
++              - '$day1/sites/{{ "{{" }}path[1]{{ "}}" }}/mces/{{ "{{" }}path.basename{{ "}}" }}/values.yaml'
++            values: |
++              [...]                       # unchanged, minus ocpVersion
++        - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day1/platform-config.git'
++          targetRevision: main
++          ref: day1
+```
+
+`source:` becomes `sources:` with the chart source **first** — the platform
+recursion and the harness both key off `sources[0]`. The frozen
+`namespace: gitops-{{ .Values.repository }}` line is untouched, as always.
+
+**`clusters/templates/clustersAppset.yaml`** — the same shape, plus the
+in-cluster exclude that the marker filename used to provide implicitly:
+
+```diff
+-        files:
+-          - path: "{{ .Values.mcePath }}/*/hc.yaml"
++        directories:
++          - path: "{{ .Values.mcePath }}/*"
++          - path: "{{ .Values.mcePath }}/in-cluster"
++            exclude: true
+     [...]
+-        day2.gitops/ocp-version: '{{ "{{" }}ocpVersion{{ "}}" }}'
+     [...]
++            valueFiles:
++              - '$day1/sites/{{ .Values.site }}/mces/{{ .Values.mce }}/hostedClusters/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+             values: |
+-              [...]
+-              ocpVersion: '{{ "{{" }}ocpVersion{{ "}}" }}'
++              [...]                       # unchanged, minus ocpVersion
++        - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day1/platform-config.git'
++          targetRevision: main
++          ref: day1
+```
+
+**`clusters/templates/inClusterApp.yaml`** — derive, label, and hand the raw
+tag down:
+
+```diff
++{{- $mastertag := required "mastertag missing: no day1 platform-config file at sites/<site>/mces/<mce>/values.yaml, or it lacks the key" .Values.mastertag | toString -}}
++{{- $ocpVersion := $mastertag | splitList "-" | first -}}
+ apiVersion: argoproj.io/v1alpha1
+     [...]
+-    day2.gitops/ocp-version: '{{ .Values.ocpVersion }}'
++    day2.gitops/ocp-version: '{{ $ocpVersion }}'
+     [...]
+-          ocpVersion: '{{ .Values.ocpVersion }}'
++          mastertag: '{{ $mastertag }}'
+```
+
+**`operators/templates/operators.yaml`** — the same two derivation lines at the
+top (message: `no day1 platform-config entry for this destination`), then
+`.Values.ocpVersion` → `$ocpVersion` in all three places: the label, the inline
+value passed to the deploy chart, and the `versions/ocp-<v>/` valueFile path.
+
+`deploy/templates/deployApp.yaml` needs **no change** — it consumes
+`.Values.ocpVersion`, which now arrives carrying the full version.
+
+`required` is deliberate: with `ignoreMissingValueFiles: true`, a missing day1
+file would otherwise render an empty version and silently resolve the wrong
+(team-default) layer. A loud render failure leaves the existing children in
+place — nothing is deleted.
+
+**Expect a transient during rollout.** Every layer tracks `main` with
+`selfHeal`, so a chart can sync the new revision before its parent has stamped
+the new app spec, surfacing `mastertag missing` render errors for a few
+minutes until the appset controller reconciles top-down. Self-resolving.
+
+> **STAGE GATE — do not start E.3 until this passes.** On live Argo, confirm
+> the app set is name-identical to before the MR: same count, nothing added,
+> nothing removed. This is the one step that changes how clusters are
+> *discovered*; while the markers still exist, rollback is a plain revert.
+>
+> ```console
+> kubectl get applications -A -l day2.gitops/team=<group> --no-headers | wc -l
+> kubectl get applications -n gitops-<group> -l day2.gitops/role=mce \
+>   -o custom-columns=NAME:.metadata.name,DEST:.spec.destination.name
+> ```
+
+### E.3 — sigs repos: delete every marker (one commit per team)
+
+Only after the E.2 gate. The markers are inert the moment E.2 is live — nothing
+globs them — so this is pure cleanup, and it is also where the deferred §0
+step 3 lands:
+
+```console
+find . \( -name mce.yaml -o -name hc.yaml -o -name config.yaml \) -path '*mces/*' -delete
+git add -A && git commit -m "markers deleted: folder presence is the opt-in, version comes from day1"
+```
+
+**Check `git status` before committing: only deletions.** Every folder that
+held a marker must still contain other tracked content (`in-cluster/`, a
+hosted-cluster folder, a chart folder). If deleting the marker would empty a
+folder, add a `.gitkeep` in the same commit — git cannot track an empty
+directory, and the folder disappearing is the cluster disappearing.
+
+### E.4 — docs
+
+Refresh from the mock: `ARCHITECTURE.md` (discovery contract, version
+management, labels, runbooks R1/R2/R6/R7/R9, invariants checklist), the
+team-repo root README, and `defaults/mces/README.md`. Copy the updated
+`render_chain.py` across — it takes a new `--day1 ROOT` (default
+`../gitops-day1/platform-config`) and still hardcodes `GROUP`.
 
 ---
 
@@ -558,10 +1041,16 @@ returns nothing.
 
 | Mistake | Consequence | Control |
 |---|---|---|
-| Team misses Phase A when B merges | its `<group>-<mce>` apps deleted; workloads orphaned, unmanaged | precondition gate; recovery = add config.yaml — apps recreate and re-adopt (same names) |
+| Team misses Phase A when B merges | its `<group>-<mce>` apps deleted; workloads orphaned, unmanaged | precondition gate; recovery = add the marker file — apps recreate and re-adopt (same names) |
 | Folder copied, not moved | duplicate app name in one appset — undefined/flapping | one-commit `git mv` rule; harness duplicate check |
-| Version unquoted (`4.20` → float `4.2`) | wrong `ocp-<v>` layer resolved, silently | quoting rule; harness lints every config.yaml |
-| config.yaml env/site disagrees with path (window only) | humans misread the tree | harness path⇔config assertion |
+| Version unquoted (`4.20` → float `4.2`) | wrong `ocp-<v>` layer resolved, silently | *pre-E only.* After E nothing in sigs declares a version; the day1 `mastertag` is arch-suffixed so it cannot parse as a float, and the harness lints its format |
+| marker env/site disagrees with path (window only) | humans misread the tree | *pre-E only* — harness path⇔config assertion; after E there is no marker to disagree |
+| One marker filename reused at two depths | every hosted cluster becomes a phantom MCE; `no clusters with this name` (§0) | distinct `mce.yaml`/`hc.yaml`; harness fails any depth-ambiguous `files:` glob. **Phase E retires the whole class** — `directories:` is depth-exact in the engine |
+| **(E)** day1 has no file for a cluster folder | that cluster's apps fail to render — loudly, nothing deleted | E.0 precondition 2; harness parity lint names the exact expected day1 path; `required` in the templates |
+| **(E)** stray non-cluster folder under an MCE | becomes a phantom hosted-cluster Application | harness parity lint fails it (a stray folder has no day1 file) before merge |
+| **(E)** marker deleted from a folder with no other content | the folder vanishes from git ⇒ the cluster vanishes from the fleet | E.3 rule: `.gitkeep` in the same commit; `git status` must show only deletions |
+| **(E)** day1 file carries a platform key (`hub:`, `env:`, `site:`…) | silently becomes a chart value; a truthy `hub:` drops the `defaults/hosted-clusters` generator for that cluster | E.0 precondition 4 grep, before the platform MR |
+| **(E)** day1 tag bumped before the `versions/ocp-<new>/` layer exists | pinned charts silently fall back to the team default | layers are per-**exact** version now: create the layer, then flip the tag (R1/R2) |
 | Removing an old glob before the folder moved | that folder's apps deleted for a window | add-first ordering (C'), remove only after the move lands |
 | "Fixing" the frozen `namespace:` line while in there | fleet-wide app identity change → delete/recreate | explicitly frozen |
 | `targetRevision` in a `defaults/*` config | silently overrides every stream pin for that chart | README rule: defaults configs carry repourl/namespace/syncPolicy; pins live in `operators/` |
@@ -581,6 +1070,21 @@ returns nothing.
 | Dry-run: hosted-cluster upgrade (`ocpVersion` 4.20→4.22) | blast radius = that cluster only; label + version-layer paths flip; zero workload diff for `main`-tracking charts |
 | Dry-run: MCE upgrade | MCE's in-cluster charts re-pin; hosted clusters under it untouched |
 | Dry-run: stream pin (`versions/ocp-4.20/cluster-roles.yaml` → `2.1.4`) | leaf `targetRevision` flips on the two 4.20 clusters only; 4.16 untouched |
+
+### Phase E, verified in the mock (2026-08-17)
+
+Both snapshots taken with the updated harness; day1 mock brought to parity
+first (its `mastertag` streams match what the markers declared, so the change
+is provably version-neutral).
+
+| Check | Result |
+|---|---|
+| Phase E end-to-end (generator swap + day1 sourcing + marker deletion) | **35 → 35 apps, `IDENTITY OK`, exit 0, zero HARD failures, no apps added or removed** |
+| Diffs, per the compare contract | INFO only: the 6 discovery apps (2 MCE + 4 hosted-cluster) gained the `ref: day1` source and its resolved file, lost the `ocp-version` label, changed their valueFiles list; 26 apps' `ocp-version` label went `4.16`→`4.16.27` / `4.20`→`4.20.9`; version slots became `versions/ocp-4.16.27` / `ocp-4.20.9` |
+| Resolved **sigs** value-file content sequences | byte-identical on all 35 — no workload renders differently |
+| Negative: day1 file removed | parity lint names the expected path **and** the `required` render error is reported as a CHECK FAILURE, not a traceback |
+| Negative: day1 tag drifts from a still-present marker | lint fails with both values (migration-window guard) |
+| Negative: stray folder under an MCE | parity lint fails it and says it would become a phantom app |
 
 Operational runbooks (upgrade a cluster, upgrade a chart, add a chart, add a
 cluster/MCE/site) and the full architecture rationale: **`ARCHITECTURE.md`**.

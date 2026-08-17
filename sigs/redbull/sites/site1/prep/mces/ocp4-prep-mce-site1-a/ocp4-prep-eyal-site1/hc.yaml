@@ -1,6 +1,0 @@
-# Cluster registry entry. Presence of this file is what makes the folder a
-# hosted cluster to the platform's files generator. env/site are NEVER set
-# here — they come from the sites/<site>/<env>/ position of the MCE above.
-# The cluster's OWN OCP version — selects the operators/<chart>/versions/ocp-<v>/
-# layers for every chart on this cluster. ALWAYS quote (4.20 would parse as 4.2).
-ocpVersion: "4.20"

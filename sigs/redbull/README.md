@@ -3,9 +3,11 @@
 Everything this team deploys through the day2 GitOps platform lives here.
 The platform (`argocd-day2-prod/argocd-day2-platform`) scans this repo with
 ApplicationSet generators; **folders are discovered, files are read — nothing
-is registered anywhere else**. The deep-dive is in `ARCHITECTURE.md` at
-the day2 repo root next to `CHANGES.md` (in the air-gapped env, keep a copy in
-the platform repo); this README is the working contract.
+is registered anywhere else**. The one thing not declared here is the OCP
+version — it is read from the day1 repo at render time (see below). The
+deep-dive is in `ARCHITECTURE.md` at the day2 repo root next to `CHANGES.md`
+(in the air-gapped env, keep a copy in the platform repo); this README is the
+working contract.
 
 ## The tree
 
@@ -17,13 +19,11 @@ sigs/redbull/
 │       └── <env>/                      # prod | prep | test — nothing else
 │           ├── values.yaml             # optional site+env values
 │           └── mces/
-│               └── <mce>/              # folder name == Argo cluster name
-│                   ├── config.yaml     # ocpVersion of the MCE itself (REQUIRED)
+│               └── <mce>/              # THE FOLDER IS THE MCE (no registry file)
 │                   ├── values.yaml     # optional MCE-wide values
 │                   ├── in-cluster/     # charts on the MCE hub itself
 │                   │   └── <chart>/{<chart>.yaml, values.yaml}
-│                   └── <cluster>/      # folder name == Argo cluster name
-│                       ├── config.yaml # ocpVersion of the cluster (REQUIRED)
+│                   └── <cluster>/      # any other folder here IS a hosted cluster
 │                       ├── values.yaml # optional cluster-wide values
 │                       └── <chart>/{<chart>.yaml, values.yaml}
 ├── operators/                          # WHAT can run (per-chart, team-wide; never generator-scanned)
@@ -31,7 +31,7 @@ sigs/redbull/
 │       ├── <chart>.yaml                # team-default deploy config (default version pin)
 │       ├── values.yaml                 # team-default values
 │       └── versions/                   # ONLY for version-sensitive charts
-│           └── ocp-<v>/{<chart>.yaml, values.yaml}   # per OCP stream
+│           └── ocp-<v>/{<chart>.yaml, values.yaml}   # per OCP version, FULL: ocp-4.16.27
 └── defaults/                           # deploy-once-to-a-whole-fleet layers
     ├── hub/                            # → the prod-hub mgmt cluster (see its README)
     ├── mces/                           # → every MCE hub          (see its README)
@@ -54,23 +54,52 @@ sigs/redbull/
    (`redbull-<cluster>-<chart>-deploy`) — path levels above them never appear
    in an app name. That is why folders can move without apps being recreated.
 
-## config.yaml — the cluster registry entry
+## What makes a folder a cluster
 
-Presence of `config.yaml` is what makes a folder an MCE or a hosted cluster;
-a folder without one is invisible to the generators (that is why `in-cluster/`
-and chart folders are never mistaken for clusters). It carries exactly one
-key:
+There is **no registry file** — a cluster declares itself by existing:
 
-```yaml
-ocpVersion: "4.20"   # the folder's OWN cluster. ALWAYS quote — 4.20 unquoted is the float 4.2
-```
+- a folder under `sites/<site>/<env>/mces/` **is** an MCE;
+- any folder inside an MCE folder except `in-cluster/` **is** a hosted
+  cluster of that MCE.
 
-- env/site are **never** written here — they come from the path
-  (`sites/<site>/<env>/`).
-- `ocpVersion` selects the `operators/<chart>/versions/ocp-<v>/` layers for
-  every chart deployed to that cluster. An MCE's own version governs its
-  in-cluster charts; each hosted cluster's version governs its charts.
-- **A cluster OCP upgrade is a one-line edit of this file.** No folder moves.
+Both are `directories:` generators (`sites/*/*/mces/*` and `<mcePath>/*`,
+minus `in-cluster`), and there `*` matches exactly one path segment — the
+depth is exact by construction, so env and site are read straight off the
+path and never written anywhere.
+
+- **Onboarding a cluster = creating its folder.** git cannot track an empty
+  folder, so a cluster (or MCE) that has no chart of its own yet needs a
+  `.gitkeep` inside it to exist in the repo at all.
+- ⚠️ **Nothing but clusters lives under an MCE folder.** A stray folder
+  (docs, scripts, a scratch copy) becomes a phantom Application aimed at a
+  cluster that does not exist. The render check catches it before merge — a
+  stray folder has no day1 version file.
+
+## Where the OCP version comes from
+
+Not from here. Each cluster's version is owned by the day1 repo
+(`gitops-day1/platform-config`) that provisioned it, as `mastertag`, and is
+resolved at Argo render time:
+
+| this repo | the day1 file that holds the version |
+|---|---|
+| `sites/<site>/<env>/mces/<mce>/` | `sites/<site>/mces/<mce>/values.yaml` |
+| `sites/<site>/<env>/mces/<mce>/<cluster>/` | `sites/<site>/mces/<mce>/hostedClusters/<cluster>.yaml` |
+
+The day1 tree has **no `<env>` level** (env lives only inside the cluster
+name), and a hosted-cluster folder name equals its day1 file name minus
+`.yaml`.
+
+- `mastertag: 4.16.27-x86_64` → `ocpVersion: 4.16.27` (the arch suffix is
+  stripped at the first `-`, the rest used verbatim). That version selects
+  the `operators/<chart>/versions/ocp-<v>/` layers for every chart deployed
+  to that cluster: an MCE's own version governs its in-cluster charts, each
+  hosted cluster's version governs its charts.
+- **A cluster OCP upgrade is a day1 edit — nothing changes in this repo.**
+  One physical cluster, one version, shared by all five sig repos instead of
+  duplicated in each.
+- A cluster with no day1 entry **fails the render loudly**; nothing ever
+  deploys with a silently empty version.
 
 ## Chart folders and the two value stacks
 
@@ -97,15 +126,25 @@ frozen at creation — a fix is a new branch, never a push to an existing one.
 | Scope | File |
 |---|---|
 | Team default | `operators/<chart>/<chart>.yaml` (`targetRevision`) |
-| One OCP stream (the fleet op) | `operators/<chart>/versions/ocp-<v>/<chart>.yaml` |
+| One OCP version (the fleet op) | `operators/<chart>/versions/ocp-<v>/<chart>.yaml` |
 | One cluster (emergency) | `sites/.../<cluster>/<chart>/<chart>.yaml` |
+
+`<v>` is the **full** version derived from day1's `mastertag` —
+`versions/ocp-4.16.27/`, never `ocp-4.16/`. Every layer is per exact patch
+version.
+
+⚠️ **Create the `versions/ocp-<new>/` layer BEFORE day1 flips the tag** — on
+every upgrade, z-streams included. A missing layer is not an error:
+`ignoreMissingValueFiles` cannot tell "no layer needed" from "layer
+forgotten", so a pinned chart silently falls back to the team default in
+`operators/<chart>/<chart>.yaml`.
 
 Charts that track `main` (most of them) simply have no `versions/` dir —
 nothing to create, nothing changes for them on cluster upgrades.
 
 ⚠️ A `targetRevision` in a `defaults/*/<chart>/<chart>.yaml` file sits ABOVE
-the stream-pin layer and silently overrides it. Keep `targetRevision` out of
-defaults configs for any chart that should follow stream pins.
+the version-pin layer and silently overrides it. Keep `targetRevision` out of
+defaults configs for any chart that should follow version pins.
 
 ## Hard rules
 

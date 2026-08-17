@@ -19,20 +19,27 @@ team has charts (helm packages) that need to run on some of these clusters.
 
 The whole thing is driven by git folders. **There is no registration form and
 no UI step: creating a folder in your team's repo is how you deploy
-something, and a one-line file edit is how you upgrade something.** Argo CD
-watches the repos and turns folders into running applications.
+something, and a one-line file edit is how you upgrade something** — a chart
+version here, a cluster's OCP version in the day1 repo. Argo CD watches the
+repos and turns folders into running applications.
 
 ## The one sentence to remember
 
-> **Folders say WHERE things run. Files say WHICH VERSION runs there.**
+> **Folders say WHERE things run. The day1 repo says WHICH VERSION runs
+> there.**
 
 - Where = the `sites/` tree: `sites/<site>/<env>/mces/<mce>/<cluster>/`.
   A cluster's site and environment never change, so they live in the path.
-- Which version = small files: a cluster's OCP version is one line in its
-  `config.yaml`; a chart's pinned version is one line in a pin file.
+  The folder's *existence* is the entire opt-in — there is no file to add.
+- Which OCP version = the **day1** repo (`gitops-day1/platform-config`) —
+  the repo that provisioned the cluster and owns its version as one line,
+  `mastertag`. Argo resolves it at render time; no sig repo declares it.
+- Which *chart* version = one line in a pin file, in your team repo (§4.2).
 
 That's the core design decision. Upgrading a cluster or a chart is a one-line
-merge request — never moving folders around.
+merge request — never moving folders around. And because every sig renders
+the OCP version from that same day1 file, one edit upgrades a cluster for all
+of them at once.
 
 ## What was wrong before
 
@@ -41,9 +48,10 @@ The old repo was a flat list of MCEs. It worked, but:
 - **You couldn't see prod vs prep.** Environment and site were only hidden
   inside folder names like `ocp4-prep-mce-site1-a`. "Upgrade all prod" meant
   reading names and hoping.
-- **Versions didn't exist.** Nothing recorded which OCP version a cluster
-  runs, or which chart version is right for which OCP version. That
-  knowledge lived in people's heads.
+- **Versions didn't exist.** Nothing connected a cluster to the OCP version
+  it runs, or told you which chart version is right for which OCP version.
+  That knowledge lived in people's heads. (Today the cluster half is answered
+  by the day1 repo, the chart half by `versions/ocp-<v>/`.)
 - **No way to act on a fleet.** The generated Argo apps had no labels, so
   there was no "sync everything prod" command. Ever.
 - **Deploying a chart to every hosted cluster meant copy-pasting its folder
@@ -57,13 +65,13 @@ The old repo was a flat list of MCEs. It worked, but:
 
 | You want to... | You do... |
 |---|---|
-| upgrade a cluster to OCP 4.20 | edit one line: `ocpVersion: "4.20"` in its `config.yaml` |
-| upgrade a chart on all 4.20 clusters | edit one line in `operators/<chart>/versions/ocp-4.20/<chart>.yaml` |
+| upgrade a cluster to OCP 4.20.9 | edit one line in the **day1** repo: `mastertag: 4.20.9-x86_64` — one edit, every sig |
+| upgrade a chart on all 4.20.9 clusters | edit one line in `operators/<chart>/versions/ocp-4.20.9/<chart>.yaml` |
 | deploy a chart to ONE cluster | add a folder with 2 files under that cluster |
 | deploy a chart to EVERY hosted cluster | add a folder with 2 files under `defaults/hosted-clusters/` |
-| add a new cluster | add a folder with 1 file (`config.yaml`) |
+| add a new cluster | create its folder — that's all (day1 already knows its version) |
 | sync everything prod | `argocd app sync -l day2.gitops/env=prod` |
-| see which clusters run 4.16 | one `grep` |
+| see which clusters run 4.16.27 | one `grep` in the day1 repo |
 
 And the safety story stayed the same or got better: renders are verified
 before merge, moves update apps in place, and even a bad mistake orphans
@@ -83,6 +91,10 @@ workloads (they keep running) rather than deleting them.
   Applications/ApplicationSets. It's the machinery. Teams rarely touch it.
 - **Your team repo** (`sigs/<team>`) — folders + small YAML files. This is
   where all day-to-day work happens.
+- **The day1 repo** (`gitops-day1/platform-config`) — the repo that
+  *provisions* the clusters, and therefore owns their OCP versions
+  (`mastertag`). Day2 reads it at render time and never writes to it. It is
+  the one place a cluster's version is written for all five sig repos.
 - **Chart repos** (`helm-charts/<chart>`) — the real workload helm charts,
   one repo each, one **frozen branch per release**.
 
@@ -95,17 +107,21 @@ become a running chart on the herzi cluster?
 1. **prod-hub** discovers the team: the `groups` appset scans GitLab, finds
    `sigs/redbull`, and creates one app that renders the platform's `mces`
    chart for redbull.
-2. That chart contains an appset that scans the team repo for
-   `sites/*/*/mces/*/config.yaml`. It finds the MCE's config.yaml, so it
+2. That chart contains an appset that lists the **directories** matching
+   `sites/*/*/mces/*` in the team repo. The MCE's folder is one, so it
    creates the app `redbull-ocp4-prod-mce-site1-a` — which renders the
-   platform's `clusters` chart **onto the MCE's own Argo**, passing along:
-   the MCE's path, site (`site1`), env (`prod`), and the MCE's `ocpVersion`.
-3. On the MCE, that chart's appset scans `<mce-path>/*/config.yaml`, finds
-   the herzi cluster's config.yaml, and creates `redbull-ocp4-prod-herzi-site1`
-   — which renders the `operators` chart, now passing the *cluster's* own
-   `ocpVersion`.
-4. The `operators` appset lists the directories in the cluster's folder.
-   It finds `cluster-roles/` and creates `redbull-ocp4-prod-herzi-site1-cluster-roles`
+   platform's `clusters` chart **onto the MCE's own Argo**, passing along the
+   MCE's path, site (`site1`) and env (`prod`), plus a second, value-only
+   source pointing at the **day1** repo, so that the MCE's `mastertag`
+   arrives with it.
+3. On the MCE, that chart's appset lists the directories inside the MCE
+   folder (everything but `in-cluster/`), finds `ocp4-prod-herzi-site1/`, and
+   creates `redbull-ocp4-prod-herzi-site1` — which renders the `operators`
+   chart, now with the day1 pointer aimed at the *cluster's* own version
+   file.
+4. The `operators` appset derives `ocpVersion: 4.16.27` from that
+   `mastertag`, then lists the directories in the cluster's folder. It finds
+   `cluster-roles/` and creates `redbull-ocp4-prod-herzi-site1-cluster-roles`
    — which renders the `deploy` chart, merging the chart's config files
    (which repo? which branch? which namespace?) from lowest to highest
    priority.
@@ -115,11 +131,20 @@ become a running chart on the herzi cluster?
    `ocp4-prod-herzi-site1`, with the merged values. An operator syncs it
    (leaf apps don't auto-sync), and the chart runs.
 
-Notice what did the work: **a config.yaml made a folder count as a cluster;
-a directory made a chart exist there.** No exclude lists, no registries. A
-folder without config.yaml (like `in-cluster/`, `defaults/`, or a chart
-folder) is simply invisible to the cluster-discovery steps — that's the
-trick that removed all the special-case rules.
+Notice what did the work: **a folder made a cluster count as a cluster; a
+directory made a chart exist there; the day1 repo said which OCP version to
+build the value paths from.** No exclude lists, no registries, no
+registration files. Files are never scanned by the cluster-discovery steps,
+only directories — so a `values.yaml` next to a cluster folder is invisible
+to them, and the one directory that must not count (`in-cluster/`) is
+excluded by name in one place.
+
+And notice that nothing in step 2 or 3 could have matched at the wrong depth:
+a `directories:` glob is matched one path segment at a time, so
+`sites/*/*/mces/*` cannot reach down to the herzi cluster. That guarantee used
+to be carried by a naming convention — two marker files that had to be named
+differently — and is now carried by the matching engine itself. §2.1 explains
+why the difference was worth a production incident.
 
 ---
 
@@ -135,13 +160,12 @@ sigs/redbull/
 │       ├── prep/
 │       │   ├── values.yaml             # optional site+env values (slot)
 │       │   └── mces/
-│       │       └── ocp4-prep-mce-site1-a/
-│       │           ├── config.yaml     # ocpVersion: "4.20"  ← the MCE itself
+│       │       └── ocp4-prep-mce-site1-a/    # ← this FOLDER is the MCE (version: day1)
+│       │           ├── values.yaml     # optional MCE-wide values (slot) — not a marker
 │       │           ├── in-cluster/     # charts on the MCE hub itself
 │       │           │   ├── bmhgen/{bmhgen.yaml, values.yaml}
 │       │           │   └── kyverno/{kyverno.yaml, values.yaml}
-│       │           ├── ocp4-prep-eyal-site1/
-│       │           │   ├── config.yaml # ocpVersion: "4.20"  ← this cluster
+│       │           ├── ocp4-prep-eyal-site1/ # ← this FOLDER is a hosted cluster
 │       │           │   └── cluster-roles/{cluster-roles.yaml, values.yaml}
 │       │           └── ocp4-prep-itay-site1/...
 │       └── prod/mces/ocp4-prod-mce-site1-a/...
@@ -149,6 +173,7 @@ sigs/redbull/
 │   ├── cluster-roles/{cluster-roles.yaml, values.yaml}
 │   ├── kyverno/...
 │   └── <chart>/versions/ocp-<v>/{<chart>.yaml, values.yaml}  # only version-sensitive charts
+│                                       # <v> = the FULL version, e.g. ocp-4.16.27
 └── defaults/                           # deploy-once-to-a-whole-fleet
     ├── hub/                            # → prod-hub itself
     ├── mces/                           # → every MCE hub (dhcp-api-token lives here)
@@ -167,37 +192,87 @@ Rules worth internalizing:
   seen by prod-hub's Argo). Same word, per-Argo meaning.
 - **Why `mces/` exists but there's no `envs/` wrapper:** a container folder
   must earn its place. The literal `mces` segment in the glob
-  `sites/*/*/mces/*/config.yaml` stops a stray config.yaml elsewhere from
-  fabricating a phantom MCE, and keeps the env level free for future
-  siblings. Envs are a closed set (`prod|prep|test`) and the only children
-  of a site — a wrapper would only add depth.
+  `sites/*/*/mces/*` confines MCE discovery to that subtree, and keeps the
+  env level free for future siblings. Envs are a closed set
+  (`prod|prep|test`) and the only children of a site — a wrapper would only
+  add depth. (The literal segment bounds the *subtree*; the `*`s bound the
+  *depth*, because a `directories:` glob is matched segment by segment.
+  That used to take a naming convention instead — §2.1.)
+- **A folder that would otherwise be empty needs a `.gitkeep`.** git tracks
+  files, not directories: an MCE or cluster onboarded before it has any
+  charts or values of its own does not exist in git at all, and therefore
+  produces no app. §1.1.
 - **`example-chart` folders are convention demos.** Never ship them to prod.
 
-### 1.1 `config.yaml` — the cluster registry entry
+### 1.1 The folder IS the registration — and day1 owns the version
 
-```yaml
-ocpVersion: "4.20"    # ALWAYS quoted — YAML parses bare 4.20 as the float 4.2
+```
+sites/<site>/<env>/mces/<mce>/             ← this folder existing makes it an MCE
+sites/<site>/<env>/mces/<mce>/<cluster>/   ← this folder existing makes it a hosted cluster
 ```
 
-One key, three jobs:
+There is no registration file, no marker, and no key to fill in. Every
+directory under `sites/*/*/mces/` is an MCE; every directory inside one is a
+hosted cluster, except `in-cluster/`, which is excluded by name (it is the
+MCE hub itself, and it is reached by a different template). Both discovery
+generators are `directories:` generators, whose `*` matches exactly one path
+segment — so the depth of each level is enforced by the matching engine, not
+by a naming convention (§2.1).
 
-1. **Discovery marker.** The generators anchor on it: folder with config.yaml
-   at MCE depth = an MCE; one level deeper = a hosted cluster; no file = not
-   a cluster, invisible. One canonical filename also guarantees at most one
-   generator entry per folder — by construction, not by discipline.
-2. **The version.** `ocpVersion` is the OCP version of the folder's **own**
-   cluster, and it is the *only* version key in the system. There is no
-   separate "MCE version": an MCE hub is versioned by its own OCP version
-   exactly like a hosted cluster. This value selects every
-   `operators/<chart>/versions/ocp-<v>/` layer for charts going to that
-   destination.
-3. **Extension point.** Future per-cluster metadata (maintenance windows,
-   canary flags, pause switches) gets a key here — no restructuring.
+**Where the OCP version comes from.** It is not declared in this repo at all.
+Argo resolves it at render time from the **day1** repo
+`gitops-day1/platform-config` — the repo that provisioned the cluster, and
+therefore the one that knows what it runs:
 
-env/site are **never** written in the file — the platform reads them from the
-path (`path[1]` = site, `path[2]` = env). (During the migration window only,
-MCE-level files temporarily carry env/site because the legacy layout has no
-path to read them from — Phase D removes them.)
+| the day2 folder | the day1 file that owns its version |
+|---|---|
+| `sites/<site>/<env>/mces/<mce>` | `sites/<site>/mces/<mce>/values.yaml` |
+| `sites/<site>/<env>/mces/<mce>/<cluster>` | `sites/<site>/mces/<mce>/hostedClusters/<cluster>.yaml` |
+
+```yaml
+# gitops-day1/platform-config/sites/site1/mces/ocp4-prod-mce-site1-a/values.yaml
+mastertag: 4.16.27-x86_64
+```
+
+Two things to internalise about that mapping:
+
+- **The day1 tree has no `<env>` level.** Environment lives only inside the
+  cluster's name (the `prod` in `ocp4-prod-mce-site1-a`), so translating a
+  day2 path into a day1 path means dropping the `<env>` segment. Site and MCE
+  names match exactly.
+- **A hosted cluster's folder name equals its day1 file name minus `.yaml`.**
+  That equality is the join key — and it is the same basename that is already
+  the Argo cluster name, so there is nothing new to keep in sync.
+
+Why day1 rather than here: the air-gap runs **five sig repos**, and the same
+physical cluster appears in all five. Its version used to be written five
+times, and drifted. Now a cluster is upgraded once, in the repo that actually
+upgrades it, and every sig re-renders against the new value.
+
+**Two caveats that come with folder-existence discovery:**
+
+1. **git cannot track an empty folder.** A cluster or MCE onboarded before it
+   has any content of its own — no chart folders, no `values.yaml` — will not
+   exist in git, and so produces no Application. Drop a `.gitkeep` in it and
+   it is real.
+2. **A stray folder becomes a phantom Application.** Anything you put under
+   an MCE folder that is not a cluster gets an app whose `destination.name`
+   is a cluster that does not exist — and the same applies one level up, to a
+   stray folder directly under `sites/<site>/<env>/mces/`. This is caught
+   offline before merge: a stray folder has no day1 version file, so the
+   render check's day1-parity lint names the folder and says exactly that
+   (§6-5), at both levels. Files are safe — only directories are scanned.
+
+The marker files `mce.yaml` / `hc.yaml` that used to sit in these folders are
+**gone**. They existed only to carry `ocpVersion`; once the version moved to
+day1 there was nothing left for them to carry, so they were deleted rather
+than emptied. If per-cluster *platform* metadata is ever needed (maintenance
+windows, canary flags, pause switches), it comes back as a value-file **slot**
+that the templates list explicitly — not as a discovery marker. Discovery
+stays on directories.
+
+env/site are **never** written in a file — the platform reads them from the
+path (`path[1]` = site, `path[2]` = env) and passes them down as values.
 
 ### 1.2 Chart folders — the two files
 
@@ -213,42 +288,86 @@ A chart folder anywhere means "deploy this chart to this context" and holds:
 
 ## 2. Discovery mechanics — how folders become Applications
 
-Two generator types do all the work:
+Argo offers two git generator types; the platform uses **only one of them**:
 
-- **git files generator** — "one Application per *matching file*". Gives the
-  template `{{path}}` (the directory containing the file),
-  `{{path.basename}}`, `{{path[n]}}` segments, **plus every key inside the
-  file** as a parameter. That last part is how `ocpVersion` travels from
-  config.yaml into the chain. Used to discover MCEs and hosted clusters.
 - **git directories generator** — "one Application per *matching directory*".
-  Path parameters only. Used for chart folders (their name is all we need).
+  Path parameters only: `{{path}}`, `{{path.basename}}`, `{{path[n]}}`.
+  Every discovery step in the chain is one of these — MCEs, hosted clusters,
+  chart folders, defaults folders.
+- **git files generator** — "one Application per *matching file*". Same path
+  parameters **plus every key inside the file**. The platform no longer uses
+  it anywhere: the only thing it was ever used for was carrying `ocpVersion`
+  out of a marker file, and that value now comes from the day1 repo through a
+  value file instead. Read §2.1 before you reach for one.
 
-`*` in a glob matches exactly one path segment. Parameters are substituted
-into the appset's template text; the result is an Application.
+Parameters are substituted into the appset's template text; the result is an
+Application. The two generators do **not** interpret `*` the same way — read
+§2.1 before you write or edit a glob.
 
 The full chain (each row renders the next):
 
 | Layer | Template | Generator | Emits | Runs on |
 |---|---|---|---|---|
 | groups | `groups/templates/groupsAppset.yaml` | scmProvider (GitLab group) | App `<team>` → platform `mces` chart | prod-hub |
-| mces | `mces/templates/mcesAppset.yaml` | **files**: `sites/*/*/mces/*/config.yaml` | App `<team>-<mce>` → `clusters` chart, destination = the MCE; passes `mce`, `mcePath`, `env`, `site`, `ocpVersion` | prod-hub |
+| mces | `mces/templates/mcesAppset.yaml` | **dirs**: `sites/*/*/mces/*` | App `<team>-<mce>` → `clusters` chart, destination = the MCE; passes `mce`, `mcePath`, `env`, `site` + a `$day1` value file = the MCE's `mastertag` | prod-hub |
 | app-projects | `mces/templates/appProjectAppset.yaml` | clusters (all) | AppProject `<team>` on every cluster (sync-wave −1) | prod-hub |
 | hub charts | `mces/templates/inClusterAppset.yaml` | dirs: `defaults/hub/*` | App `<team>-in-cluster-<chart>` → `deploy` chart in hub mode | prod-hub |
-| clusters | `clusters/templates/clustersAppset.yaml` | **files**: `<mcePath>/*/config.yaml` | App `<team>-<cluster>` → `operators` chart; `ocpVersion` **overridden** with the cluster's own | the MCE |
-| — static | `clusters/templates/inClusterApp.yaml` | none (always rendered) | App `<team>-in-cluster` → `operators` chart with `cluster: in-cluster`; `ocpVersion` **inherited** from the MCE | the MCE |
+| clusters | `clusters/templates/clustersAppset.yaml` | **dirs**: `<mcePath>/*`, minus `<mcePath>/in-cluster` | App `<team>-<cluster>` → `operators` chart + a `$day1` value file = **this cluster's** `mastertag` | the MCE |
+| — static | `clusters/templates/inClusterApp.yaml` | none (always rendered) | App `<team>-in-cluster` → `operators` chart with `cluster: in-cluster`; passes the **MCE's** `mastertag` down inline | the MCE |
 | operators | `operators/templates/operators.yaml` | dirs ×3: `<clusterPath>/*`; `defaults/mces/*` (in-cluster only); `defaults/hosted-clusters/*` (hosted only) | App `<team>-<cluster>-<chart>` → `deploy` chart | the MCE |
 | deploy | `deploy/templates/deployApp.yaml` | — | App `<team>-<cluster>-<chart>-deploy` = **the workload**, destination `name: <cluster>` | the MCE |
 
-Two details carry the whole design:
+Three details carry the whole design:
 
-- **`ocpVersion` flows down with override semantics.** The mces layer sends
-  the MCE's version → the clusters layer replaces it with each hosted
-  cluster's own → the static in-cluster app deliberately does *not* replace
-  it. Net effect: MCE-hub charts version by the MCE's OCP version,
-  hosted-cluster charts by their own — one key, no special cases.
+- **The version enters through a second source, twice.** The per-MCE and
+  per-hosted-cluster Applications are **multi-source** apps: alongside the
+  platform chart they declare a value-only source for the day1 repo, and add
+  one `$day1/...` entry to the chart source's `valueFiles`.
+
+  ```yaml
+  sources:
+    - repoURL: '.../argocd-day2-platform.git'
+      path: operators
+      helm:
+        ignoreMissingValueFiles: true
+        valueFiles:                      # <site>/<mce> are chart values here
+          - '$day1/sites/<site>/mces/<mce>/hostedClusters/{{path.basename}}.yaml'
+    - repoURL: '.../gitops-day1/platform-config.git'
+      targetRevision: main
+      ref: day1
+  ```
+
+  That is the `clusters` layer; the `mces` layer above it points at
+  `$day1/sites/<site>/mces/<mce>/values.yaml` the same way. Either way the
+  next chart in the chain renders with `.Values.mastertag` set. (Whatever
+  else the day1 file holds —
+  `dhcp_values`, for instance — is inert: nothing downstream reads it, and
+  the inline `values:` block outranks it anyway, since Argo applies
+  `helm.values` after `valueFiles`.)
+- **The version is derived once, in exactly two templates.**
+  `clusters/templates/inClusterApp.yaml` (for the MCE hub) and
+  `operators/templates/operators.yaml` (for everything else) both open with:
+
+  ```gotemplate
+  {{- $mastertag := required "mastertag missing: ..." .Values.mastertag | toString -}}
+  {{- $ocpVersion := $mastertag | splitList "-" | first -}}
+  ```
+
+  Strip the architecture at the first `-` and use the rest **verbatim**:
+  `4.16.27-x86_64` → `4.16.27`. Nothing is truncated to a minor line. The
+  static in-cluster app deliberately passes the **raw `mastertag`** down to
+  the operators chart rather than its derived value, so there is exactly one
+  derivation rule in the chain. And `required` means a missing day1 entry is
+  a loud render failure, not a silently version-less deploy. Net effect is
+  what it always was: MCE-hub charts version by the MCE's OCP version,
+  hosted-cluster charts by their own — one rule, no special cases.
 - **Only `mcesAppset.yaml` knows the tree layout.** Every other template
   receives the generator's `{{path}}` as `mcePath`/`clusterPath` values and
   builds all file paths from them. A future layout change touches one file.
+  Knowledge of day1 is just as narrow: two templates reach into its tree
+  (`mcesAppset`, `clustersAppset`) and two derive a version from what they
+  resolve (`inClusterApp`, `operators`). Nothing else in the chain knows the
+  day1 repo exists.
 
 **The frozen line.** The template line
 `namespace: gitops-{{ .Values.repository }}` in `mcesAppset.yaml` and
@@ -256,6 +375,63 @@ Two details carry the whole design:
 wrong, known, and **deliberately frozen**: a generated app's namespace is
 part of its identity — "fixing" it would delete and recreate every app in
 the fleet. Leave it byte-identical, always.
+
+### 2.1 `*` means two different things (read before touching a glob)
+
+The two generators are matched by two different engines, and only one of them
+is depth-exact:
+
+| Generator | Matched by | Does `*` cross `/`? |
+|---|---|---|
+| `directories:` | Go `path.Match`, in the appset controller | **No** — exactly one path segment |
+| `files:` | `git ls-files -- <pattern>` on the repo-server | **Yes** — matches at any depth |
+
+A `files:` glob is a **git pathspec**, and git matches pathspecs with
+wildmatch *without* `WM_PATHNAME`, so `*` happily eats slashes. Verify any
+glob yourself, with the same command Argo runs — here against the marker-file
+layout that used to be in the repo:
+
+```console
+$ git ls-files -- 'sites/*/config.yaml'      # in a clone of the team repo
+sites/site1/prod/mces/ocp4-prod-mce-site1-a/config.yaml                        # meant this
+sites/site1/prod/mces/ocp4-prod-mce-site1-a/ocp4-prod-herzi-site1/config.yaml  # got this too
+```
+
+**This is why cluster discovery is a `directories:` generator.** Depth cannot
+be expressed in a `files:` glob at all, so `sites/*/*/mces/*` as a
+`directories:` pattern is depth-exact for free: `*` stops at `/`, therefore it
+matches an MCE folder and can never reach a hosted cluster one level below.
+The property comes from the **engine**, and an engine cannot be forgotten
+during a review.
+
+That was not always so, and the difference cost an outage:
+
+> **The Phase B production incident.** Discovery used to be a `files:`
+> generator anchored on a marker file, and both levels used the same filename,
+> `config.yaml`. Because `*` crosses `/` in a git pathspec, `mcesAppset`
+> matched every hosted cluster's file too and emitted an Application whose
+> `destination.name` was a hosted cluster — Argo answered *"there are no
+> clusters with this name"* for each one. The first fix was to make depth a
+> property of the *filename*: `mce.yaml` for MCEs, `hc.yaml` for hosted
+> clusters, never the same name at two depths. CHANGES.md §0 has the full
+> write-up.
+
+Those marker files are gone now, and with them the discipline they required.
+The hazard is **avoided by construction rather than managed by convention**:
+there is no discovery glob left whose correctness depends on what a file is
+called. The teaching survives its own fix, because it applies to any `files:`
+generator anyone adds later, for any purpose.
+
+Argo *can* be told to match `files:` globs with depth-exact doublestar instead
+(`applicationsetcontroller.enable.new.git.file.globbing: "true"`). We
+deliberately never relied on it: it defaults to off, and `clustersAppset` runs
+on **every MCE's** Argo, so the whole fleet — including every MCE onboarded in
+the future — would have had to carry the flag forever. `directories:` needs no
+cluster-side configuration and cannot silently regress.
+
+`render_chain.py` models both engines and fails the pre-merge check on any
+`files:` glob whose two readings differ, so this class of bug cannot reach a
+merge request again. That guard is kept even though nothing matches it today.
 
 ## 3. The two value stacks (how a chart gets its configuration)
 
@@ -266,13 +442,18 @@ declared with `ignoreMissingValueFiles: true`, so think of each layer as a
 creating it later is always a deliberate, scoped opt-in. Most slots are empty
 today. That is the normal, intended state.
 
+Every slot in both stacks lives in your **team** repo (`$values`). The one
+day1 file in the chain is not part of them: it is resolved further up the
+chain, by the per-MCE and per-cluster Applications, purely to supply `<v>`
+(§2).
+
 **Stack 1 — deploy config** (`<chart>.yaml` files; decides repo, branch,
 namespace, sync policy), lowest → highest:
 
 | # | Hosted cluster | MCE in-cluster | prod-hub |
 |---|---|---|---|
 | 1 | `operators/<c>/<c>.yaml` | same | same |
-| 2 | `operators/<c>/versions/ocp-<v>/<c>.yaml` — `<v>` is the destination's own version | same (`<v>` = the MCE's) | — (hub is version-less) |
+| 2 | `operators/<c>/versions/ocp-<v>/<c>.yaml` — `<v>` is the destination's own **full** version, from day1 (e.g. `ocp-4.16.27`) | same (`<v>` = the MCE's) | — (hub is version-less) |
 | 3 | `defaults/hosted-clusters/<c>/<c>.yaml` | `defaults/mces/<c>/<c>.yaml` | `defaults/hub/<c>/<c>.yaml` |
 | 4 | `<clusterPath>/<c>/<c>.yaml` | `<mcePath>/in-cluster/<c>/<c>.yaml` | — |
 
@@ -282,7 +463,7 @@ sees), lowest → highest, hosted-cluster column in full:
 | # | Layer | Scope |
 |---|---|---|
 | 1 | `operators/<c>/values.yaml` | chart, team-wide |
-| 2 | `operators/<c>/versions/ocp-<v>/values.yaml` | chart, per OCP stream |
+| 2 | `operators/<c>/versions/ocp-<v>/values.yaml` | chart, per exact OCP version |
 | 3 | `sites/<site>/values.yaml` | site-wide, chart-agnostic (use sparingly) |
 | 4 | `sites/<site>/<env>/values.yaml` | site + env |
 | 5 | `defaults/hosted-clusters/<c>/values.yaml` | chart, whole fleet |
@@ -302,12 +483,28 @@ The most context-specific file always wins.
 
 ## 4. Version management
 
-### 4.1 One key: `ocpVersion`
+### 4.1 One source: the day1 `mastertag`
 
-A destination's `ocpVersion` selects layer 2 of both stacks. Upgrading a
-cluster's OCP = one-line diff in its config.yaml; every chart app on it
-re-renders against the new `ocp-<v>` layers. Nothing moves, nothing renames,
-nothing syncs by itself.
+A destination's OCP version is not declared in this repo. It is read at
+render time from the day1 repo and derived by stripping the architecture:
+
+```yaml
+# gitops-day1/platform-config/sites/site1/mces/ocp4-prod-mce-site1-a/hostedClusters/ocp4-prod-herzi-site1.yaml
+mastertag: 4.16.27-x86_64      # → ocpVersion 4.16.27
+```
+
+`ocpVersion` is that derived value, and it is the **full patch version** —
+nothing is rounded to `4.16`. It selects layer 2 of both stacks
+(`versions/ocp-4.16.27/`) and becomes the `day2.gitops/ocp-version` label.
+There is still no separate "MCE version": an MCE hub is versioned by its own
+day1 `mastertag` exactly like a hosted cluster (§1.1 maps folder → file).
+
+Upgrading a cluster's OCP is a one-line diff in the **day1** repo; every chart
+app on that cluster — in every sig repo — re-renders against the new `ocp-<v>`
+layers. Nothing moves, nothing renames, nothing syncs by itself.
+
+Because the key is a full patch version, the version layer changes on **every**
+upgrade, z-stream bumps included. That is the sharp edge — §4.4-2.
 
 ### 4.2 Chart versions: frozen branches + pin files
 
@@ -322,16 +519,16 @@ the single audit trail.
 Three pin levels, lowest → highest (each is one line in one file):
 
 ```yaml
-# operators/ako/ako.yaml                      — team default
+# operators/ako/ako.yaml                        — team default
 targetRevision: "2.1.2"
-# operators/ako/versions/ocp-4.20/ako.yaml    — the per-stream matrix (the fleet op)
+# operators/ako/versions/ocp-4.20.9/ako.yaml    — the per-version matrix (the fleet op)
 targetRevision: "2.1.4"
 # sites/<site>/<env>/mces/<mce>/<cluster>/ako/ako.yaml — per-cluster emergency pin
 targetRevision: "2.1.5-hotfix"
 ```
 
-`git log` on the stream file *is* the version history of that chart on that
-stream.
+`git log` on the version-layer file *is* the history of that chart on that
+OCP version.
 
 ### 4.3 Version-agnostic charts (the majority) cost nothing
 
@@ -346,12 +543,12 @@ The two axes — branch pinning and per-OCP values — are independent per chart
 |---|---|---|
 | tracks `main` | none | nothing — no folder at all |
 | tracks `main` | needed | `values.yaml` only |
-| pinned per stream | none | `<chart>.yaml` only |
-| pinned per stream | needed | both files |
+| pinned per version | none | `<chart>.yaml` only |
+| pinned per version | needed | both files |
 
-Escalating later is additive: a chart breaks on 4.22 → add
-`versions/ocp-4.22/<chart>.yaml` with a pin; only 4.22 destinations pick it
-up. Reverting = deleting that file.
+Escalating later is additive: a chart breaks on 4.22.3 → add
+`versions/ocp-4.22.3/<chart>.yaml` with a pin; only destinations on exactly
+that version pick it up. Reverting = deleting that file.
 
 Trade-off of `main`-tracking: for those charts the chart repo's `main` is
 the audit trail, not a day2 pin — any push makes every leaf app OutOfSync,
@@ -360,17 +557,26 @@ branch and pinning costs one line.
 
 ### 4.4 ⚠️ Two precedence footguns
 
-1. **Defaults configs override stream pins.** `defaults/*/<c>/<c>.yaml` is
+1. **Defaults configs override version pins.** `defaults/*/<c>/<c>.yaml` is
    layer 3; `versions/` is layer 2. A `targetRevision` in a defaults config
-   (like `dhcp-api-token`'s `main` today) silently wins over every stream
+   (like `dhcp-api-token`'s `main` today) silently wins over every version
    pin. Rule: defaults configs carry `repourl`/`projectNamespace`/
    `syncPolicy`; pins live in `operators/`.
-2. **Add the layer before flipping the version.** If `versions/ocp-4.20/`
-   doesn't exist for a *pinned* chart when a cluster flips to `"4.20"`, the
-   slot resolves to nothing and the cluster silently falls back to the team
-   default. Ignore-missing can't tell "no layer needed" from "layer
-   forgotten" — that's the price of §4.3 being free. Add the stream files
-   first, then flip; confirm with the render check.
+2. **Add the layer before day1 flips the tag — on EVERY upgrade.** Version
+   layers are keyed by the full patch version, so `4.16.27 → 4.16.29` moves a
+   destination off `versions/ocp-4.16.27/` exactly as surely as `4.16 → 4.20`
+   once did. If the new folder doesn't exist for a *pinned* chart, the slot
+   resolves to nothing and that cluster silently falls back to the team
+   default. `ignoreMissingValueFiles` can't tell "no layer needed" from
+   "layer forgotten" — that's the price of §4.3 being free.
+
+   This got sharper with the move to day1, in two ways. **z-stream bumps are
+   no longer exempt**: under the old `ocp-4.20` keying they changed nothing,
+   and under full-version keying every one of them needs a new folder.
+   And **the flip is not your merge request** — it lands in the day1 repo, and
+   may be merged by someone who has never opened your sig. Create
+   `versions/ocp-<new>/` first, in every sig that pins the chart, confirm with
+   the render check against the new tag, and only then let day1 move.
 
 ## 5. Labels — the fleet-operations enabler
 
@@ -383,22 +589,32 @@ day2.gitops/site: site1            # ┘
 day2.gitops/mce: ocp4-prod-mce-site1-a
 day2.gitops/cluster: ocp4-prod-herzi-site1
 day2.gitops/chart: cluster-roles   # chart-level apps and below
-day2.gitops/ocp-version: "4.16"    # the DESTINATION's version (in-cluster apps: the MCE's)
+day2.gitops/ocp-version: "4.16.27" # the DESTINATION's FULL version (in-cluster apps: the MCE's)
 day2.gitops/role: hosted-cluster   # hub | mce | hosted-cluster
 ```
+
+**Two layers deliberately have no `ocp-version`:** the per-MCE app
+(`<team>-<mce>`) and the per-hosted-cluster app (`<team>-<cluster>`). Those
+are the discovery layers, and they never learn the version — they only point
+the next chart at the day1 file that holds it. Everything below them carries
+it: the static `<team>-in-cluster` app, every chart-level app, and every
+`-deploy` leaf. In practice that is the right split: a version selector picks
+out the apps that actually deploy something on that version, and skips the two
+plumbing layers, which is what you want when syncing.
 
 Hub apps carry only team/chart/`role: hub` (prod-hub is version-less and
 outside the sites tree). Fleet operations become one selector:
 
 ```bash
 argocd app list -l day2.gitops/env=prod,day2.gitops/chart=ako
-argocd app sync -l day2.gitops/chart=ako,day2.gitops/ocp-version=4.20
+argocd app sync -l day2.gitops/chart=ako,day2.gitops/ocp-version=4.20.9
 argocd app sync -l day2.gitops/cluster=ocp4-prod-herzi-site1
 ```
 
-Labels are per-Argo: MCE-scoped selectors run against that MCE's Argo,
-hub-scoped against prod-hub. A bare `ocp-version=4.20` sweeps MCE hubs *and*
-hosted clusters together — add `day2.gitops/role` to hit only one kind.
+The version value is the **full** version — `ocp-version=4.20` matches
+nothing. Labels are per-Argo: MCE-scoped selectors run against that MCE's
+Argo, hub-scoped against prod-hub. A bare `ocp-version=4.20.9` sweeps MCE hubs
+*and* hosted clusters together — add `day2.gitops/role` to hit only one kind.
 
 ## 6. The safety model — why changes are survivable
 
@@ -431,13 +647,46 @@ hosted clusters together — add `day2.gitops/role` to hit only one kind.
    python3 tools/render-verify/render_chain.py compare /tmp/before /tmp/after
    ```
 
-   `compare` fails hard if any app's identity (name, destination,
-   releaseName, syncPolicy, repo/branch) or its *resolved value-file
-   contents* changed. It also lints: quoted versions, env ∈
-   {prod,prep,test}, duplicate app names, leftover `{{...}}` placeholders,
-   the frozen namespace line. Structural changes must end `IDENTITY OK`;
-   deliberate changes (pins, values) must show **only** the diffs you
-   intended, on the apps you intended.
+   `snapshot` needs a checkout of the **day1** repo — every destination's
+   version is read from it. It defaults to `../gitops-day1/platform-config`
+   next to this repo; override with `--day1 ROOT`. Without one it refuses to
+   run rather than guess.
+
+   `compare` splits every app's resolved value files by repo, because the two
+   have opposite expectations:
+
+   - the **sigs** sequence is **HARD** — a change there changes what a
+     workload renders;
+   - the **day1** sequence is **INFO** — that is precisely where versions are
+     supposed to change.
+
+   Identity (name, destination, releaseName, syncPolicy, repo/branch) stays
+   HARD, as do disappearing apps. A value-only `ref:` source is **not**
+   identity — adding one (the day1 repo) must not read as an app being
+   recreated — but *losing* one is HARD, because it breaks resolution.
+
+   It also lints: env ∈ {prod,prep,test}, duplicate app names, leftover
+   `{{...}}` placeholders, the frozen namespace line, depth-ambiguous `files:`
+   globs, and — the new one — **day1 parity**: every MCE and hosted-cluster
+   folder must have a day1 file carrying a `mastertag` matching
+   `<major>.<minor>.<patch>[-<arch>]`. That lint is what turns a stray folder
+   under an MCE into a pre-merge failure instead of a phantom Application
+   (§1.1). A chart that refuses to render at all — `required` firing because
+   day1 has no entry for a destination — is reported as a check failure like
+   any other, not as a traceback.
+
+   Structural changes must end `IDENTITY OK`; deliberate changes (pins,
+   values) must show **only** the diffs you intended, on the apps you
+   intended.
+
+   The day1-version change itself was verified this way, and its shape is a
+   good model of what "only the diffs you intended" looks like: **35 apps → 35
+   apps, `IDENTITY OK`, zero HARD failures, nothing added or removed.** The
+   INFO diffs were exactly three groups — the 6 discovery apps (2 MCE + 4
+   hosted-cluster) gained the day1 ref source and its resolved file, lost
+   their `ocp-version` label and changed their `valueFiles` list; 26 apps'
+   `ocp-version` went `4.16` → `4.16.27` and `4.20` → `4.20.9`; and the
+   version-pin slots became `versions/ocp-4.16.27` / `versions/ocp-4.20.9`.
 
 ---
 
@@ -445,44 +694,53 @@ hosted clusters together — add `day2.gitops/role` to hit only one kind.
 
 ### R1. Upgrade a hosted cluster (OCP)
 
+The edit is **in the day1 repo**, not here — nothing changes in `sites/`:
+
 ```diff
-  # sites/site1/prod/mces/ocp4-prod-mce-site1-a/ocp4-prod-herzi-site1/config.yaml
-- ocpVersion: "4.16"
-+ ocpVersion: "4.20"
+  # gitops-day1/platform-config/sites/site1/mces/ocp4-prod-mce-site1-a/hostedClusters/ocp4-prod-herzi-site1.yaml
+- mastertag: 4.16.27-x86_64
++ mastertag: 4.20.9-x86_64
 ```
 
-1. **Before flipping:** for every *pinned* chart on that cluster, make sure
-   `operators/<chart>/versions/ocp-4.20/` exists (footgun §4.4-2).
-   `main`-tracking charts need nothing.
-2. Merge the one-line MR. Every chart app of that cluster re-renders with
-   the `ocp-4.20` layers and its `ocp-version` label flips. **Nothing syncs
-   by itself** — apps go OutOfSync and wait for you.
+1. **Before day1 flips it:** for every *pinned* chart on that cluster, create
+   `operators/<chart>/versions/ocp-4.20.9/` — in **every sig repo** that
+   deploys that chart there (footgun §4.4-2; z-stream bumps too, since the
+   key is the full version). `main`-tracking charts need nothing. Render-verify
+   against the new tag before day1 moves.
+2. Merge the one-line day1 MR. Every chart app of that cluster — again, in
+   every sig — re-renders with the `ocp-4.20.9` layers and its `ocp-version`
+   label flips. **Nothing syncs by itself** — apps go OutOfSync and wait for
+   you.
 3. Roll out: `argocd app sync -l day2.gitops/cluster=ocp4-prod-herzi-site1`
    (or chart by chart).
-4. Rollback: revert the commit.
+4. Rollback: revert the day1 commit.
 
-Blast radius: that one cluster. (Verified by dry-run in the mock: 3 apps
-touched, zero workload diff for `main`-tracking charts.)
+Blast radius: that one cluster — but across every sig that deploys to it. The
+coordination now happens *before* the merge, in the day1 MR, not after. (The
+shape was verified by dry-run in the mock: only that cluster's own apps
+re-render, and `main`-tracking charts show zero workload diff.)
 
 ### R2. Upgrade an MCE (OCP)
 
-The same one-line edit, one level up:
-`sites/<site>/<env>/mces/<mce>/config.yaml`. The MCE's in-cluster charts
-re-pin to the new stream; **hosted clusters under it do not change** — they
-carry their own `ocpVersion`. (Both properties verified by dry-run.)
+The same one-line edit, one file up in the day1 tree:
+`sites/<site>/mces/<mce>/values.yaml` — note there is no `<env>` segment on
+the day1 side (§1.1). The MCE's in-cluster charts re-pin to the new version;
+**hosted clusters under it do not change** — each resolves its own day1 file,
+so the isolation is structural, not a convention. Nothing moves in `sites/`
+either way. (Both properties verified by dry-run.)
 
 ### R3. Upgrade a chart
 
 | Scope | Edit | Roll out with |
 |---|---|---|
-| One OCP stream — the normal fleet op | `operators/<c>/versions/ocp-4.20/<c>.yaml` → `targetRevision: "2.1.5"` | `argocd app sync -l day2.gitops/chart=<c>,day2.gitops/ocp-version=4.20` |
+| One OCP version — the normal fleet op | `operators/<c>/versions/ocp-4.20.9/<c>.yaml` → `targetRevision: "2.1.5"` | `argocd app sync -l day2.gitops/chart=<c>,day2.gitops/ocp-version=4.20.9` |
 | Team default (everything without a higher pin) | `operators/<c>/<c>.yaml` | by label, as broad or narrow as you want |
 | One cluster (emergency) | `sites/.../<cluster>/<c>/<c>.yaml` | `argocd app sync <team>-<cluster>-<c>-deploy` |
 
 - The pin value is a **frozen branch name** in the chart's repo (§4.2). Ship
   a fix as a new branch + new pin, never a force-push.
-- Before a stream upgrade, find clusters with their own emergency pin — they
-  will *not* move with the stream:
+- Before a version-layer upgrade, find clusters with their own emergency pin
+  — they will *not* move with the layer:
   `grep -rl targetRevision sites/*/*/mces/*/*/<c>/`
 - Rollback: revert the pin file.
 
@@ -506,7 +764,7 @@ Pick the audience — `defaults/hub/` (prod-hub), `defaults/mces/` (every MCE
 hub), or `defaults/hosted-clusters/` (every hosted cluster). One folder, two
 files; optional `values-<env>.yaml` / `values-<mce|cluster>.yaml` siblings
 for per-scope tuning. Rules: XOR with specific folders; no `targetRevision`
-here if the chart should follow stream pins (§4.4-1); before the first-ever
+here if the chart should follow version pins (§4.4-1); before the first-ever
 hub chart, check the AppProject permits destination `in-cluster` + the
 target namespace.
 
@@ -517,54 +775,71 @@ basename ⇒ byte-identical app, updated in place. Render-verify it.
 
 ### R6. Add a new hosted cluster
 
-Precondition: the cluster is registered in the MCE's Argo under the exact
-name the folder will have (basename == Argo cluster name, convention
-`ocp4-<env>-<name>-<site>`).
+Two preconditions:
+
+1. The cluster is registered in the MCE's Argo under the exact name the
+   folder will have (basename == Argo cluster name, convention
+   `ocp4-<env>-<name>-<site>`).
+2. day1 has a version file for it, at
+   `sites/<site>/mces/<mce>/hostedClusters/<new-cluster>.yaml`, carrying
+   `mastertag`. It normally does — day1 is what provisioned the cluster in
+   the first place. If it doesn't, the render fails loudly (`required`)
+   rather than deploying a version-less app, and the render check names the
+   folder before you merge.
 
 ```
 sites/<site>/<env>/mces/<mce>/<new-cluster>/
-├── config.yaml          # ocpVersion: "4.20"  (quoted!)
-└── <chart>/...          # its charts — or nothing: defaults/hosted-clusters apply automatically
+├── <chart>/...          # its charts — or nothing: defaults/hosted-clusters apply automatically
+└── .gitkeep             # ONLY if the folder would otherwise be empty — git can't track an empty dir
 ```
 
-The moment config.yaml merges, the cluster exists: `<team>-<new-cluster>`
-appears, plus one chart app per folder **plus** one per
-`defaults/hosted-clusters/` chart. The team's AppProject already exists on
-every cluster.
+There is no file to write: the folder *is* the registration. The moment it
+merges, the cluster exists: `<team>-<new-cluster>` appears, plus one chart app
+per folder **plus** one per `defaults/hosted-clusters/` chart. The team's
+AppProject already exists on every cluster.
 
 ### R7. Add a new MCE / env / site
 
-The tree is uniform — same shape, one level up:
+The tree is uniform — same shape, one level up, same precondition (day1
+carries `sites/<site>/mces/<new-mce>/values.yaml` with a `mastertag`):
 
 ```
 sites/<site>/<env>/mces/<new-mce>/
-├── config.yaml          # ocpVersion of the MCE itself
-└── in-cluster/          # optional; defaults/mces charts apply automatically
+├── in-cluster/          # optional; defaults/mces charts apply automatically
+└── .gitkeep             # ONLY if the folder would otherwise be empty
 ```
 
 A new env is a new folder under the site — it **must** be `prod`, `prep` or
-`test` (the render check enforces this). A new site is a new folder under
-`sites/`. Nothing to register in the platform; the globs match any
-site/env.
+`test` (the render check enforces this), and it needs nothing at all on the
+day1 side, whose tree has no env level. A new site is a new folder under
+`sites/` here *and* a `sites/<site>/` in day1. Nothing to register in the
+platform; the globs match any site/env.
 
 ### R8. Decommission / temporary removal
 
-Deleting a chart folder (or a cluster's config.yaml) deletes the generated
+Deleting a chart folder (or a whole cluster folder) deletes the generated
 Application CRs but **orphans the workloads in place** — they keep running,
 unmanaged. Re-adding the same-named folder re-adopts them. For a true
 teardown, delete the Applications with cascade first, then remove the
 folders. Exception: `dhcp-api-token` sets `prune: true` itself — deleting
 its folder removes the Secret on every MCE.
 
+Note the day1 side is independent: removing a cluster folder here stops day2
+from deploying to it, and leaves day1 (and the cluster) untouched.
+
 ### R9. Find things
 
 ```bash
-# which clusters run 4.16
-grep -rl 'ocpVersion: "4.16"' sites/
+# which clusters run 4.16.27 — the version lives in the day1 repo
+grep -rl 'mastertag: 4.16.27' sites/           # in gitops-day1/platform-config
+# every cluster's version at a glance
+grep -r mastertag sites/                       # in gitops-day1/platform-config
+# ...or from Argo — matches the workload-carrying apps, not the two discovery layers
+argocd app list -l day2.gitops/ocp-version=4.16.27
 # everything prod on site1 running ako
 argocd app list -l day2.gitops/env=prod,day2.gitops/site=site1,day2.gitops/chart=ako
-# the full version history of a chart on a stream
-git log --oneline -- operators/ako/versions/ocp-4.20/
+# the full history of a chart on one OCP version
+git log --oneline -- operators/ako/versions/ocp-4.20.9/
 ```
 
 ---
@@ -573,15 +848,29 @@ git log --oneline -- operators/ako/versions/ocp-4.20/
 
 ## Invariants checklist (print this)
 
-- Folder basename == Argo cluster name. Always.
-- `ocpVersion` always quoted. `config.yaml` = ocpVersion only.
+- Folder basename == Argo cluster name. Always — and, for a hosted cluster,
+  == its day1 file name minus `.yaml`.
+- A folder's **existence** registers a cluster: an MCE is a directory under
+  `sites/*/*/mces/`, a hosted cluster is any directory inside one except
+  `in-cluster/`. There are no marker files.
+- `.gitkeep` any cluster or MCE folder that would otherwise be empty — git
+  cannot track an empty directory, so without it the cluster does not exist.
+- Nothing but MCEs directly under `mces/`, nothing but clusters directly
+  under an MCE folder: a stray directory at either level becomes a phantom
+  Application (the day1-parity lint catches it).
+- Every MCE and hosted-cluster folder has a day1 file carrying
+  `mastertag: <major>.<minor>.<patch>[-<arch>]`. **day1 is the only place an
+  OCP version is ever written** — never in a sig repo.
+- Discovery generators are `directories:`, never `files:` — a `directories:`
+  glob is depth-exact, a `files:` glob is a git pathspec and is not (§2.1).
 - One `git mv` per move, one commit. Never copy-then-delete.
 - XOR: a chart lives in a defaults folder OR a specific folder. Never both.
 - `repourl` all-lowercase in deploy configs.
 - Version branches are frozen; a fix is a new branch.
 - Pins live in `operators/`; defaults configs never carry `targetRevision`
   (unless deliberately, like dhcp-api-token).
-- Add `versions/ocp-<v>/` files **before** flipping a cluster to `<v>`.
+- Add `versions/ocp-<v>/` files **before** day1 flips the tag to `<v>` — on
+  every upgrade, z-streams included, in every sig that pins the chart.
 - The `namespace: gitops-{{ .Values.repository }}` line is frozen.
 - Render-verify before every merge: `IDENTITY OK` or it doesn't ship.
 
@@ -595,11 +884,16 @@ git log --oneline -- operators/ako/versions/ocp-4.20/
 | `in-cluster` | every Argo's name for the cluster it runs on |
 | Application | Argo's "deploy this chart there" object |
 | ApplicationSet / appset | template + generator that stamps out Applications from git content |
-| files / directories generator | "one app per matching file" / "per matching directory" |
+| files / directories generator | "one app per matching file" / "per matching directory". Discovery uses **only** `directories:` (§2.1) |
+| multi-source app | an Application with several `sources:`; the extra `ref:` ones supply value files only — that is how `$day1` reaches the chain |
+| day1 / `platform-config` | `gitops-day1/platform-config` — the repo that provisions clusters and owns their OCP versions. Day2 reads it, never writes it |
+| `mastertag` | day1's version key: `<major>.<minor>.<patch>[-<arch>]`, e.g. `4.16.27-x86_64` |
+| `ocpVersion` | the derived value the platform uses: `mastertag` with the architecture stripped at the first `-` (`4.16.27`). Never declared in a sig repo |
+| version layer | `operators/<chart>/versions/ocp-<v>/` — the slot keyed by a destination's **exact** OCP version |
+| stream | older name for a version layer, from when it was keyed by the minor line (`ocp-4.20`). Layers are keyed by the full version now, so every upgrade moves off one |
 | leaf app | `<team>-<cluster>-<chart>-deploy` — the app that deploys the actual workload |
 | deploy config | `<chart>.yaml` — repo/branch/namespace/sync settings for a chart |
 | slot | a value-file path that is always listed but may not exist (`ignoreMissingValueFiles`) |
-| stream | an OCP minor version line (4.16, 4.20, ...) as a fleet-management unit |
 | pin | a `targetRevision` line selecting a frozen chart branch |
 | XOR rule | defaults folder OR specific folder — never both |
 | THE ONE INVARIANT | each MCE/cluster/chart emitted by exactly one generator entry, at every commit |

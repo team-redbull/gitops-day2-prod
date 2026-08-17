@@ -1,8 +1,0 @@
-# Cluster registry entry for this MCE. Its presence is what makes this folder
-# an MCE to the platform's files generator; a folder without a config.yaml is
-# invisible. env and site come from the folder's position in the sites/ tree
-# (sites/<site>/<env>/mces/<mce>/) — never from this file.
-# The MCE's OWN OCP version — selects the operators/<chart>/versions/ocp-<v>/
-# layers for every chart deployed on this MCE hub (in-cluster).
-# ALWAYS quote: YAML parses an unquoted 4.20 as the float 4.2.
-ocpVersion: "4.20"

@@ -8,11 +8,22 @@ spec:
     - git:
         repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
         revision: main
-        # An MCE is a folder holding a config.yaml (ocpVersion). Folders
-        # without one are invisible to this generator. The depth-exact glob
-        # makes the path segments trustworthy: path[1] = site, path[2] = env.
-        files:
-          - path: "sites/*/*/mces/*/config.yaml"
+        # An MCE is a FOLDER under sites/<site>/<env>/mces/. Its existence is
+        # the opt-in — there is no marker file to carry, because there is no
+        # per-MCE data left to carry: the OCP version comes from day1 (below).
+        #
+        # directories: globs are matched with Go path.Match, where '*' matches
+        # exactly ONE path segment. That makes this depth-exact by the engine
+        # itself — unlike a files: glob, whose git pathspec lets '*' cross '/'
+        # and match at any depth (the phantom-MCE bug, CHANGES.md §0).
+        #
+        # Depth being fixed, path segments are trustworthy:
+        # path[1] = site, path[2] = env.
+        #
+        # git cannot track an empty folder: an MCE onboarded before it has any
+        # content of its own needs a .gitkeep to exist here at all.
+        directories:
+          - path: "sites/*/*/mces/*"
   template:
     metadata:
       name: '{{ .Values.group }}-{{ "{{" }}path.basename{{ "}}" }}'
@@ -22,23 +33,33 @@ spec:
         day2.gitops/env: '{{ "{{" }}path[2]{{ "}}" }}'
         day2.gitops/site: '{{ "{{" }}path[1]{{ "}}" }}'
         day2.gitops/mce: '{{ "{{" }}path.basename{{ "}}" }}'
-        day2.gitops/ocp-version: '{{ "{{" }}ocpVersion{{ "}}" }}'
+        # No ocp-version label here: this layer never learns the version. It
+        # only points the clusters chart at the day1 file that holds it.
         day2.gitops/role: mce
     spec:
       project: '{{ .Values.group }}'
-      source:
-        repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/argocd-day2-platform.git'
-        targetRevision: main
-        path: clusters
-        helm:
-          ignoreMissingValueFiles: true
-          values: |
-            group: '{{ .Values.group }}'
-            mce: '{{ "{{" }}path.basename{{ "}}" }}'
-            mcePath: '{{ "{{" }}path{{ "}}" }}'
-            env: '{{ "{{" }}path[2]{{ "}}" }}'
-            site: '{{ "{{" }}path[1]{{ "}}" }}'
-            ocpVersion: '{{ "{{" }}ocpVersion{{ "}}" }}'
+      sources:
+        - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/argocd-day2-platform.git'
+          targetRevision: main
+          path: clusters
+          helm:
+            ignoreMissingValueFiles: true
+            # The MCE's OCP version enters the chain HERE. day1 provisioned
+            # this cluster and owns its version as `mastertag`; every sig
+            # renders from that one file, so an upgrade is one day1 edit
+            # instead of one edit per sig. NOTE the day1 tree has no <env>
+            # level — env lives only inside the MCE name.
+            valueFiles:
+              - '$day1/sites/{{ "{{" }}path[1]{{ "}}" }}/mces/{{ "{{" }}path.basename{{ "}}" }}/values.yaml'
+            values: |
+              group: '{{ .Values.group }}'
+              mce: '{{ "{{" }}path.basename{{ "}}" }}'
+              mcePath: '{{ "{{" }}path{{ "}}" }}'
+              env: '{{ "{{" }}path[2]{{ "}}" }}'
+              site: '{{ "{{" }}path[1]{{ "}}" }}'
+        - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day1/platform-config.git'
+          targetRevision: main
+          ref: day1
       destination:
         name: '{{ "{{" }}path.basename{{ "}}" }}'
         namespace: gitops-{{ .Values.group }}

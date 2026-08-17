@@ -8,12 +8,23 @@ spec:
     - git:
         repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
         revision: main
-        # A hosted cluster is a folder holding a config.yaml (ocpVersion only;
-        # env/site are inherited from the MCE). in-cluster/ and chart folders
-        # have no config.yaml and are invisible — this replaces the old
-        # in-cluster exclude.
-        files:
-          - path: "{{ .Values.mcePath }}/*/config.yaml"
+        # A hosted cluster is any FOLDER in the MCE dir except in-cluster/.
+        # Folder existence is the opt-in — no marker file, because there is no
+        # per-cluster data left to carry: env/site are inherited from the MCE
+        # and the OCP version comes from day1 (below).
+        #
+        # Depth-exact by the engine: directories: globs use Go path.Match,
+        # where '*' stops at '/' (see mcesAppset for why that matters).
+        #
+        # Two consequences worth knowing: a cluster onboarded with no content
+        # of its own needs a .gitkeep (git cannot track an empty folder), and
+        # a stray folder here that is NOT a cluster becomes a phantom app —
+        # render-verify's day1 parity lint catches that before merge, since a
+        # stray folder has no day1 version file.
+        directories:
+          - path: "{{ .Values.mcePath }}/*"
+          - path: "{{ .Values.mcePath }}/in-cluster"
+            exclude: true
   template:
     metadata:
       name: '{{ .Values.group }}-{{ "{{" }}path.basename{{ "}}" }}'
@@ -23,7 +34,8 @@ spec:
         day2.gitops/site: '{{ .Values.site }}'
         day2.gitops/mce: '{{ .Values.mce }}'
         day2.gitops/cluster: '{{ "{{" }}path.basename{{ "}}" }}'
-        day2.gitops/ocp-version: '{{ "{{" }}ocpVersion{{ "}}" }}'
+        # No ocp-version label here: this layer never learns the version. It
+        # only points the operators chart at the day1 file that holds it.
         day2.gitops/role: hosted-cluster
     spec:
       project: '{{ .Values.group }}'
@@ -33,6 +45,13 @@ spec:
           path: operators
           helm:
             ignoreMissingValueFiles: true
+            # The hosted cluster's OCP version enters the chain HERE: its day1
+            # file, named exactly after this folder, carries `mastertag`. The
+            # file's other keys (dhcp_values) are inert — nothing downstream
+            # reads them, and the inline values below outrank them anyway
+            # (Argo applies helm.values after valueFiles).
+            valueFiles:
+              - '$day1/sites/{{ .Values.site }}/mces/{{ .Values.mce }}/hostedClusters/{{ "{{" }}path.basename{{ "}}" }}.yaml'
             values: |
               group: '{{ .Values.group }}'
               mce: {{ .Values.mce }}
@@ -41,7 +60,9 @@ spec:
               clusterPath: '{{ "{{" }}path{{ "}}" }}'
               env: {{ .Values.env }}
               site: {{ .Values.site }}
-              ocpVersion: '{{ "{{" }}ocpVersion{{ "}}" }}'
+        - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day1/platform-config.git'
+          targetRevision: main
+          ref: day1
       destination:
         name: in-cluster
         namespace: gitops-{{ .Values.group }}
