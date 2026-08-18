@@ -3,7 +3,7 @@
      the first '-': 4.16.27-x86_64 -> 4.16.27, used verbatim as ocpVersion.
      `required` fails the render loudly if day1 has no entry — an MCE must
      never deploy with a silently empty version. */ -}}
-{{- $mastertag := required "mastertag missing: no day1 platform-config file at sites/<site>/mces/<mce>/values.yaml, or it lacks the key" .Values.mastertag | toString -}}
+{{- $mastertag := required "mastertag missing: no day1 platform-config file at sites/<site>/mces/<mce>/version.yaml, or it lacks the key" .Values.mastertag | toString -}}
 {{- $ocpVersion := $mastertag | splitList "-" | first -}}
 apiVersion: argoproj.io/v1alpha1
 kind: Application

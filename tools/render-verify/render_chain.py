@@ -387,12 +387,17 @@ def day1_version_file(site, mce, hc=None):
 
     The day1 tree has NO <env> level — env lives only inside the resource name:
       day2  sites/<site>/<env>/mces/<mce>[/<hc>]
-      day1  sites/<site>/mces/<mce>/values.yaml
+      day1  sites/<site>/mces/<mce>/version.yaml
             sites/<site>/mces/<mce>/hostedClusters/<hc>.yaml
     Hosted-cluster names match exactly, folder name == file name minus .yaml.
+
+    The two files are not the same kind of thing. A hosted cluster's file is
+    day1's own provisioning input — day2 reads the tag day1 actually installed.
+    version.yaml is day2-owned: day1's charts never consume it, and the MCE's
+    values.yaml beside it is day1's *default HC version*, not the hub's own.
     """
     if hc is None:
-        return f"sites/{site}/mces/{mce}/values.yaml"
+        return f"sites/{site}/mces/{mce}/version.yaml"
     return f"sites/{site}/mces/{mce}/hostedClusters/{hc}.yaml"
 
 

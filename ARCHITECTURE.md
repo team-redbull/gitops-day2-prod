@@ -226,15 +226,15 @@ therefore the one that knows what it runs:
 
 | the day2 folder | the day1 file that owns its version |
 |---|---|
-| `sites/<site>/<env>/mces/<mce>` | `sites/<site>/mces/<mce>/values.yaml` |
+| `sites/<site>/<env>/mces/<mce>` | `sites/<site>/mces/<mce>/version.yaml` |
 | `sites/<site>/<env>/mces/<mce>/<cluster>` | `sites/<site>/mces/<mce>/hostedClusters/<cluster>.yaml` |
 
 ```yaml
-# gitops-day1/platform-config/sites/site1/mces/ocp4-prod-mce-site1-a/values.yaml
+# gitops-day1/platform-config/sites/site1/mces/ocp4-prod-mce-site1-a/version.yaml
 mastertag: 4.16.27-x86_64
 ```
 
-Two things to internalise about that mapping:
+Three things to internalise about that mapping:
 
 - **The day1 tree has no `<env>` level.** Environment lives only inside the
   cluster's name (the `prod` in `ocp4-prod-mce-site1-a`), so translating a
@@ -243,6 +243,16 @@ Two things to internalise about that mapping:
 - **A hosted cluster's folder name equals its day1 file name minus `.yaml`.**
   That equality is the join key — and it is the same basename that is already
   the Argo cluster name, so there is nothing new to keep in sync.
+- **The two files are not the same kind of thing.** `hostedClusters/<hc>.yaml`
+  is day1's own provisioning input: day2 reads the tag day1 actually installed,
+  so the value cannot drift from reality. `version.yaml` is day2-owned — day1's
+  charts never consume it — and describes the MCE hub itself. Nothing
+  provisions or verifies a hub's version, so that one is a hand-maintained
+  assertion: whoever upgrades an MCE must edit it. It exists as its own file
+  precisely so it does not sit in the MCE's `values.yaml`, where `mastertag`
+  already means *day1's default version for the hosted clusters under this
+  MCE* — the same key, a different fact. It must carry `mastertag` and nothing
+  else; any other key in it lands as a day2 chart value.
 
 Why day1 rather than here: the air-gap runs **five sig repos**, and the same
 physical cluster appears in all five. Its version used to be written five
@@ -338,7 +348,7 @@ Three details carry the whole design:
   ```
 
   That is the `clusters` layer; the `mces` layer above it points at
-  `$day1/sites/<site>/mces/<mce>/values.yaml` the same way. Either way the
+  `$day1/sites/<site>/mces/<mce>/version.yaml` the same way. Either way the
   next chart in the chain renders with `.Values.mastertag` set. (Whatever
   else the day1 file holds —
   `dhcp_values`, for instance — is inert: nothing downstream reads it, and
@@ -497,7 +507,9 @@ mastertag: 4.16.27-x86_64      # → ocpVersion 4.16.27
 nothing is rounded to `4.16`. It selects layer 2 of both stacks
 (`versions/ocp-4.16.27/`) and becomes the `day2.gitops/ocp-version` label.
 There is still no separate "MCE version": an MCE hub is versioned by its own
-day1 `mastertag` exactly like a hosted cluster (§1.1 maps folder → file).
+day1 `mastertag` exactly like a hosted cluster (§1.1 maps folder → file) — but
+from `version.yaml`, a day2-owned file, and that one value is hand-maintained
+rather than provisioned (§1.1, third bullet).
 
 Upgrading a cluster's OCP is a one-line diff in the **day1** repo; every chart
 app on that cluster — in every sig repo — re-renders against the new `ocp-<v>`
@@ -723,8 +735,10 @@ re-render, and `main`-tracking charts show zero workload diff.)
 ### R2. Upgrade an MCE (OCP)
 
 The same one-line edit, one file up in the day1 tree:
-`sites/<site>/mces/<mce>/values.yaml` — note there is no `<env>` segment on
-the day1 side (§1.1). The MCE's in-cluster charts re-pin to the new version;
+`sites/<site>/mces/<mce>/version.yaml` — note there is no `<env>` segment on
+the day1 side (§1.1), and note this is *not* the MCE's `values.yaml` beside it.
+Unlike a hosted cluster's, this value is not written by whatever upgraded the
+hub, so it is the one version in the fleet a human must remember to bump. The MCE's in-cluster charts re-pin to the new version;
 **hosted clusters under it do not change** — each resolves its own day1 file,
 so the isolation is structural, not a convention. Nothing moves in `sites/`
 either way. (Both properties verified by dry-run.)
@@ -801,7 +815,7 @@ AppProject already exists on every cluster.
 ### R7. Add a new MCE / env / site
 
 The tree is uniform — same shape, one level up, same precondition (day1
-carries `sites/<site>/mces/<new-mce>/values.yaml` with a `mastertag`):
+carries `sites/<site>/mces/<new-mce>/version.yaml` with a `mastertag`):
 
 ```
 sites/<site>/<env>/mces/<new-mce>/

@@ -44,13 +44,19 @@ spec:
           path: clusters
           helm:
             ignoreMissingValueFiles: true
-            # The MCE's OCP version enters the chain HERE. day1 provisioned
-            # this cluster and owns its version as `mastertag`; every sig
-            # renders from that one file, so an upgrade is one day1 edit
-            # instead of one edit per sig. NOTE the day1 tree has no <env>
-            # level — env lives only inside the MCE name.
+            # The MCE hub's own OCP version enters the chain HERE. It lives
+            # in version.yaml — a day1 file day1's own charts never consume,
+            # deliberately NOT the MCE's values.yaml, whose `mastertag` is
+            # day1's *default HC version* and would collide with this one.
+            # Every sig renders from that one file, so an upgrade is one day1
+            # edit instead of one edit per sig. Two rules travel with it:
+            # it must carry `mastertag` and nothing else (any other key here
+            # lands as a chart value), and unlike a hosted cluster's tag it is
+            # hand-maintained — nothing provisions or verifies an MCE hub's
+            # version. NOTE the day1 tree has no <env> level — env lives only
+            # inside the MCE name.
             valueFiles:
-              - '$day1/sites/{{ "{{" }}path[1]{{ "}}" }}/mces/{{ "{{" }}path.basename{{ "}}" }}/values.yaml'
+              - '$day1/sites/{{ "{{" }}path[1]{{ "}}" }}/mces/{{ "{{" }}path.basename{{ "}}" }}/version.yaml'
             values: |
               group: '{{ .Values.group }}'
               mce: '{{ "{{" }}path.basename{{ "}}" }}'

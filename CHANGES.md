@@ -1245,9 +1245,35 @@ discovery path.
 
 | Layer | How it gets `mastertag` | Day1 file |
 |---|---|---|
-| per-MCE app (mcesAppset) | `$day1` valueFile on the clusters-chart source | `sites/<site>/mces/<mce>/values.yaml` |
+| per-MCE app (mcesAppset) | `$day1` valueFile on the clusters-chart source | `sites/<site>/mces/<mce>/version.yaml` |
 | per-hosted-cluster app (clustersAppset) | `$day1` valueFile on the operators-chart source | `sites/<site>/mces/<mce>/hostedClusters/<cluster>.yaml` |
 | MCE in-cluster (`inClusterApp`) | passed inline from the clusters chart | — (the MCE's, above) |
+
+**The two day1 files are not the same kind of thing** — this is why the MCE
+row does *not* point at the MCE's `values.yaml`, which is where the version
+first lived:
+
+- `hostedClusters/<hc>.yaml` is **day1's own provisioning input**. Day2 reads
+  the tag day1 actually installed, so the value cannot drift from reality. That
+  is the coupling Phase E was built to get.
+- `version.yaml` is **day2-owned**: day1's charts never consume it. It has to be
+  a file of its own because `mastertag` in the MCE's `values.yaml` already means
+  something else to day1 — *the default version for the hosted clusters under
+  this MCE*, overridden by each HC's own file. Same key, different fact, in a
+  file day1 writes. Parking the hub's version there is inert only for as long as
+  every HC keeps overriding it, and it fails silently in both directions: an HC
+  added without its own `mastertag` gets **provisioned** at what day2 believes is
+  the hub's version, and anyone editing that default silently re-versions the
+  hub's in-cluster apps in every sig — with nothing in day1's CI to catch it,
+  because day1's chart never reads the key.
+
+Two rules travel with `version.yaml`: it carries **`mastertag` and nothing
+else** (it is a value file — any other key lands as a day2 chart value), and it
+is **hand-maintained**. Nothing provisions or verifies an MCE hub's version, so
+Phase E's "the value is the tag day1 provisioned, not a human's copy of it"
+holds for hosted clusters but **not** for MCEs: whoever upgrades a hub must edit
+this file. It is the one version in the fleet no offline check can compare
+against reality.
 
 **Mind the path mapping: the day1 tree has no `<env>` level.** day2
 `sites/<site>/<env>/mces/<mce>` maps to day1 `sites/<site>/mces/<mce>` — env
@@ -1268,7 +1294,10 @@ rule to *every* upgrade, z-streams included).
    a day1 file at the mapped path carrying a `mastertag` of the form
    `<major>.<minor>.<patch>[-<arch>]`, and that version agrees with what the
    cluster is actually running. `render_chain.py` proves the parity offline —
-   it fails per folder with the exact day1 path it expected.
+   it fails per folder with the exact day1 path it expected. For MCEs that file
+   is `version.yaml` and it does not exist yet: **E.1 creates it**, and E.1 must
+   merge before E.2. The arch suffix is optional (`4.16.27` is as valid as
+   `4.16.27-x86_64`); the derivation strips at the first `-` either way.
 3. **Argo can read the day1 repo.** A credential for
    `gitops-day1/platform-config` must exist on **prod-hub's Argo and on every
    MCE's Argo** — the per-hosted-cluster apps resolve `$day1` on the MCE's
@@ -1279,8 +1308,11 @@ rule to *every* upgrade, z-streams included).
 4. **Key-collision audit of the real day1 files.** Only the keys named in each
    template's inline `values:` block are precedence-protected (Argo applies
    `helm.values` after `valueFiles`). Any *other* top-level key in a day1 file
-   silently becomes a chart value. Grep every day1 `values.yaml` and
-   `hostedClusters/*.yaml` for the platform's vocabulary:
+   silently becomes a chart value. The audit covers only the files day2
+   actually reads — `hostedClusters/*.yaml`, plus the `version.yaml` files E.1
+   creates. The MCEs' `values.yaml` is **not** in scope: day2 stopped reading it
+   when the version moved to `version.yaml`, which is half the reason for the
+   separate file. Grep them for the platform's vocabulary:
 
 ```console
 $ grep -rnE '^(group|mce|mcePath|cluster|clusterPath|env|site|hub|operator):' sites/
@@ -1289,14 +1321,62 @@ $ grep -rnE '^(group|mce|mcePath|cluster|clusterPath|env|site|hub|operator):' si
    Any hit needs handling before E.2. The dangerous one is `hub:` — a truthy
    value flips the `{{- else if not .Values.hub }}` branch in
    `operators.yaml` and silently drops the `defaults/hosted-clusters` generator
-   for that cluster. (In the mock, day1 files carry only `dhcp_values` and
-   `mastertag`, both inert.)
+   for that cluster. (In the mock, hosted-cluster files carry only `dhcp_values`
+   and `mastertag`, both inert.) A `version.yaml` should never trip this grep —
+   if one does, someone put more than `mastertag` in it.
 
-### E.1 — day1 repo: nothing to change, only to confirm
+### E.1 — day1 repo: one new file per MCE, then confirm the rest
 
-Phase E reads day1; it never writes to it. If precondition 2 turns up a cluster
-day1 does not know about, add its file there **before** E.2 — after E.2 a
-missing day1 entry is a hard render failure for that cluster's apps.
+For hosted clusters Phase E only *reads* day1 — their versions are already
+there, in the files day1 provisions from. MCEs are the exception: day1 records
+no version for a hub, so one file per MCE has to be created. Add
+`sites/<site>/mces/<mce>/version.yaml`:
+
+```yaml
+# The OCP version of the MCE hub ITSELF, read at render time by gitops-day2-prod
+# (mcesAppset -> clusters chart -> inClusterApp). day1's charts do not consume
+# this file, and it is deliberately NOT the values.yaml beside it, whose
+# `mastertag` is day1's default version for the hosted clusters under this MCE.
+#
+# THIS FILE MUST CARRY `mastertag` AND NOTHING ELSE — it is loaded as a day2
+# helm value file, so any other top-level key silently becomes a chart value.
+#
+# Hand-maintained: nothing provisions or verifies a hub's version, so this must
+# be updated by whoever upgrades the MCE. The arch suffix is optional.
+mastertag: 4.16.27-x86_64
+```
+
+**Order, and why it is three MRs, not one.** The templates and this file must
+never disagree, and the two ways they can disagree are not symmetric:
+
+1. **day1 MR — add.** Create every `version.yaml`. Leave any `mastertag`
+   already in the MCEs' `values.yaml` exactly where it is. Nothing reads the new
+   files yet, so this MR is inert on both sides.
+2. **E.2 — the platform MR.** The `mcesAppset` valueFile flips to
+   `version.yaml`. Merging this before step 1 renders `mastertag missing`
+   for every MCE's in-cluster apps, fleet-wide — the same split-brain hazard the
+   E.2 file ordering warns about below.
+3. **day1 MR — remove** (only if a `mastertag` was ever added to the MCEs'
+   `values.yaml` for day2's benefit; skip it if that key is genuinely day1's own
+   HC default). **Before merging, confirm every hosted cluster carries its own
+   tag**, including clusters with no day2 folder — day2's parity lint only
+   proves it for the ones day2 knows about:
+
+   ```console
+   $ grep -rL '^mastertag:' sites/*/mces/*/hostedClusters/*.yaml   # must print nothing
+   ```
+
+   Removing a default that some HC still relies on changes what day1
+   *provisions* — the same silent-versioning hazard, pointed the other way.
+
+Also confirm, before step 1 merges, that nothing in day1 globs the new file:
+check day1's own generators and `valueFiles`/`-f` lists for patterns like
+`sites/*/mces/*/*.yaml`. If day1 names `values.yaml` explicitly, adding a
+sibling is inert there.
+
+If precondition 2 turns up a hosted cluster day1 does not know about, add its
+file too, **before** E.2 — after E.2 a missing day1 entry is a hard render
+failure for that cluster's apps.
 
 ### E.2 — platform repo: ONE MR (4 files)
 
@@ -1421,13 +1501,19 @@ as a block; the indentation of the whole helm section shifts by two:
 +          path: clusters
 +          helm:
 +            ignoreMissingValueFiles: true
-+            # The MCE's OCP version enters the chain HERE. day1 provisioned
-+            # this cluster and owns its version as `mastertag`; every sig
-+            # renders from that one file, so an upgrade is one day1 edit
-+            # instead of one edit per sig. NOTE the day1 tree has no <env>
-+            # level — env lives only inside the MCE name.
++            # The MCE hub's own OCP version enters the chain HERE. It lives
++            # in version.yaml — a day1 file day1's own charts never consume,
++            # deliberately NOT the MCE's values.yaml, whose `mastertag` is
++            # day1's *default HC version* and would collide with this one.
++            # Every sig renders from that one file, so an upgrade is one day1
++            # edit instead of one edit per sig. Two rules travel with it:
++            # it must carry `mastertag` and nothing else (any other key here
++            # lands as a chart value), and unlike a hosted cluster's tag it is
++            # hand-maintained — nothing provisions or verifies an MCE hub's
++            # version. NOTE the day1 tree has no <env> level — env lives only
++            # inside the MCE name.
 +            valueFiles:
-+              - '$day1/sites/{{ "{{" }}path[1]{{ "}}" }}/mces/{{ "{{" }}path.basename{{ "}}" }}/values.yaml'
++              - '$day1/sites/{{ "{{" }}path[1]{{ "}}" }}/mces/{{ "{{" }}path.basename{{ "}}" }}/version.yaml'
 +            values: |
 +              group: '{{ .Values.group }}'
 +              mce: '{{ "{{" }}path.basename{{ "}}" }}'
@@ -1547,7 +1633,7 @@ spaces shallower.
 +     the first '-': 4.16.27-x86_64 -> 4.16.27, used verbatim as ocpVersion.
 +     `required` fails the render loudly if day1 has no entry — an MCE must
 +     never deploy with a silently empty version. */ -}}
-+{{- $mastertag := required "mastertag missing: no day1 platform-config file at sites/<site>/mces/<mce>/values.yaml, or it lacks the key" .Values.mastertag | toString -}}
++{{- $mastertag := required "mastertag missing: no day1 platform-config file at sites/<site>/mces/<mce>/version.yaml, or it lacks the key" .Values.mastertag | toString -}}
 +{{- $ocpVersion := $mastertag | splitList "-" | first -}}
  apiVersion: argoproj.io/v1alpha1
  kind: Application
@@ -1598,7 +1684,7 @@ serves both cluster kinds:
 +       hosted clusters  -> from this Application's own $day1 value file
 +                           (sites/<site>/mces/<mce>/hostedClusters/<cluster>.yaml)
 +       the MCE itself   -> passed inline by inClusterApp, from the MCE's day1
-+                           values.yaml
++                           version.yaml (day2-owned; day1 never reads it)
 +     One derivation either way: strip the arch at the first '-' and use the
 +     rest verbatim (4.16.27-x86_64 -> 4.16.27). Version-pin layers are keyed
 +     by that exact version, so EVERY upgrade — z-streams included — needs its
@@ -1696,9 +1782,10 @@ directory, and the folder disappearing is the cluster disappearing.
 
 ### E.4 — docs
 
-Refresh from the mock: `ARCHITECTURE.md` (discovery contract, version
-management, labels, runbooks R1/R2/R6/R7/R9, invariants checklist), the
-team-repo root README, and `defaults/mces/README.md`. Copy the updated
+Refresh from the mock: `ARCHITECTURE.md` (discovery contract — including the
+`version.yaml` vs `hostedClusters/<hc>.yaml` distinction and the hand-maintained
+caveat — version management, labels, runbooks R1/R2/R6/R7/R9, invariants
+checklist), the team-repo root README, and `defaults/mces/README.md`. Copy the updated
 `render_chain.py` across — it takes a new `--day1 ROOT` (default
 `../gitops-day1/platform-config`) and still hardcodes `GROUP`.
 
@@ -1716,7 +1803,9 @@ team-repo root README, and `defaults/mces/README.md`. Copy the updated
 | **(E)** day1 has no file for a cluster folder | that cluster's apps fail to render — loudly, nothing deleted | E.0 precondition 2; harness parity lint names the exact expected day1 path; `required` in the templates |
 | **(E)** stray non-cluster folder under an MCE | becomes a phantom hosted-cluster Application | harness parity lint fails it (a stray folder has no day1 file) before merge |
 | **(E)** marker deleted from a folder with no other content | the folder vanishes from git ⇒ the cluster vanishes from the fleet | E.3 rule: `.gitkeep` in the same commit; `git status` must show only deletions |
-| **(E)** day1 file carries a platform key (`hub:`, `env:`, `site:`…) | silently becomes a chart value; a truthy `hub:` drops the `defaults/hosted-clusters` generator for that cluster | E.0 precondition 4 grep, before the platform MR |
+| **(E)** day1 file carries a platform key (`hub:`, `env:`, `site:`…) | silently becomes a chart value; a truthy `hub:` drops the `defaults/hosted-clusters` generator for that cluster | E.0 precondition 4 grep, before the platform MR — and `version.yaml` is `mastertag`-only by rule, so only `hostedClusters/*.yaml` carries the risk |
+| **(E)** an MCE hub is upgraded and nobody edits its `version.yaml` | its in-cluster charts stay pinned to the old `ocp-<v>` layer — silently, and in every sig | none offline: no day1 field records a hub's version, so this is the one value no check can compare against reality. Make it part of the hub-upgrade runbook (R2) |
+| **(E)** the hub's version put in the MCE's `values.yaml` instead | day1 reads that key as its *default HC version*: an HC without its own tag gets provisioned at the hub's version, and editing it re-versions the hub's apps | separate `version.yaml` (E.1); before removing any such key, verify every `hostedClusters/*.yaml` carries its own `mastertag` |
 | **(E)** day1 tag bumped before the `versions/ocp-<new>/` layer exists | pinned charts silently fall back to the team default | layers are per-**exact** version now: create the layer, then flip the tag (R1/R2) |
 | Removing an old glob before the folder moved | that folder's apps deleted for a window | add-first ordering (C'), remove only after the move lands |
 | Human cascade-deletes an app while the tree is churning | that app's workloads torn down — the one deletion path the no-finalizer model does not cover | optional delete guard rail (`tools/migration-guardrail/`), on before C and off after E |

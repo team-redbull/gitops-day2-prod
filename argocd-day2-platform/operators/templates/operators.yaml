@@ -2,7 +2,7 @@
        hosted clusters  -> from this Application's own $day1 value file
                            (sites/<site>/mces/<mce>/hostedClusters/<cluster>.yaml)
        the MCE itself   -> passed inline by inClusterApp, from the MCE's day1
-                           values.yaml
+                           version.yaml (day2-owned; day1 never reads it)
      One derivation either way: strip the arch at the first '-' and use the
      rest verbatim (4.16.27-x86_64 -> 4.16.27). Version-pin layers are keyed
      by that exact version, so EVERY upgrade — z-streams included — needs its
