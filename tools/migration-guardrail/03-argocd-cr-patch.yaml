@@ -1,0 +1,18 @@
+# Stops the gitops-operator from reconciling its default cluster-scoped
+# ClusterRole/ClusterRoleBinding back over the guard rail.
+#
+# Without this the operator restores the default (cluster-admin-shaped) role
+# within seconds and the guard silently does nothing.
+#
+# ORDER IS LOAD-BEARING: create 01 and 02 FIRST, then apply this patch. The
+# operator garbage-collects its own binding on the flip; if the replacement is
+# not already in place the controller is left with zero cluster permissions and
+# the whole instance stops reconciling.
+#
+# Apply with:
+#   oc patch argocd <instance> -n <ns> --type=merge \
+#     --patch-file tools/migration-guardrail/03-argocd-cr-patch.yaml
+#
+# Rollback: same patch with false — the operator recreates its default role.
+spec:
+  defaultClusterScopedRoleDisabled: true

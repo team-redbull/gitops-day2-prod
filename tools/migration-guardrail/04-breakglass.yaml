@@ -1,0 +1,55 @@
+# BREAK-GLASS — not part of the normal guard rail. Bind only for the duration
+# of one sync, then delete both objects.
+#
+# Why it exists: Kubernetes refuses to let a subject create or update a
+# Role/ClusterRole granting permissions it does not itself hold, or bind to a
+# role it does not fully hold. Under the guard rail Argo no longer holds
+# delete/deletecollection/use, so applying a chart that ships RBAC with delete
+# verbs or an SCC `use` grant is rejected with:
+#
+#   is attempting to grant RBAC permissions not currently held:
+#   {APIGroups:["apps"], Resources:["deployments"], Verbs:["delete"]}
+#
+# This does NOT happen on the migration path — every RBAC-shipping chart in the
+# tree is manual-sync and a recreated Application that already matches live
+# state issues zero writes. It happens only if a human syncs one of those charts
+# during the window, or a new chart lands.
+#
+# WHILE THIS IS BOUND the guard is degraded: `escalate` lets Argo author a
+# ClusterRole granting itself delete and bind to it. Keep the window to the
+# single sync you need.
+#
+# Complete sequence — there is no separate binding file on purpose, so that the
+# grant and its removal are one command each and cannot be left lying around:
+#
+#   oc apply -f 04-breakglass.yaml
+#   oc adm policy add-cluster-role-to-user argocd-no-delete-breakglass \
+#       -z <instance>-argocd-application-controller -n <namespace>
+#
+#   <sync the one app in the Argo UI / argocd app sync <name>>
+#
+#   oc adm policy remove-cluster-role-from-user argocd-no-delete-breakglass \
+#       -z <instance>-argocd-application-controller -n <namespace>
+#   oc delete -f 04-breakglass.yaml
+#
+# Confirm it is gone before walking away:
+#   oc get clusterrole argocd-no-delete-breakglass     # must be NotFound
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argocd-no-delete-breakglass
+  labels:
+    day2.gitops/purpose: migration-guardrail-breakglass
+rules:
+  # escalate: author a Role/ClusterRole containing verbs Argo does not hold.
+  # bind:     create a RoleBinding/ClusterRoleBinding to such a role.
+  #           bind can be narrowed with resourceNames to the specific roles your
+  #           charts reference; escalate cannot be scoped that way.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "clusterroles"]
+    verbs: ["escalate", "bind"]
+  # OpenShift: `use` is a verb on SCCs. Charts that need a non-default SCC ship
+  # a Role granting it, and Argo must hold `use` to create that Role.
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    verbs: ["use"]
