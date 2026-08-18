@@ -236,6 +236,43 @@ skipped.**
 | Phase D (drop legacy glob; env/site from path; strip marker fields) | **skip — subsumed by E** | E.2 replaces the generator wholesale with one `sites/` `directories:` entry, env/site already from `path[1]`/`path[2]`; E.3 deletes the markers instead of editing their fields; D.2's README refresh is E.4 |
 | Phase E | **the new end state** | versions from day1, markers deleted |
 
+### Optional: the delete guard rail
+
+Phase C moves every team's tree one commit per MCE, and all platform-layer apps
+run `selfHeal: true` — there is no post-merge inspection window. The safety model
+already covers the *automated* failure modes: no Application carries a
+`resources-finalizer`, so a dropped generator entry orphans workloads instead of
+deleting them, and every platform appset is `prune: false`. What it does not
+cover is a **human** cascade-deleting an app from the UI or CLI while the tree is
+churning, and the single chart that opts into `prune: true` for itself
+(`defaults/mces/dhcp-api-token`).
+
+`tools/migration-guardrail/` closes that gap: a ClusterRole under which Argo can
+delete `Application` and `ApplicationSet` CRs and nothing else. Apps and appsets
+stay freely recreatable — which is exactly what C, C' and E do to them — while
+the workloads underneath cannot be torn down.
+
+- **Optional.** Skip it and the orphaning model above still holds. You are
+  choosing whether to also guard against operator error.
+- **On before the first Phase C `git mv` merges, off after E is verified.** It is
+  a migration-window posture, not a permanent one.
+- **It is not one cluster.** Applying it only to prod-hub's local ServiceAccount
+  protects almost nothing: `mcesAppset` targets the MCE by name while
+  `clustersAppset`/`operators.yaml` target `in-cluster` and `deployApp` targets
+  the hosted cluster, so deletes flow through four separate identities. The role
+  has to land on every MCE and on the credentials Argo uses to reach hosted
+  clusters too. `tools/migration-guardrail/discover.sh` works out which objects
+  those are on your fleet.
+- **Known cost while it is on:** manual syncs of charts that ship RBAC
+  (`operators/{cluster-roles,kyverno,bmhgen}`) fail by design — Kubernetes will
+  not let Argo create a Role granting `delete` when Argo no longer holds it.
+  All three are manual-sync, so nothing breaks on its own; just do not sync them
+  during the window. There is a documented break-glass if you must.
+
+Read `tools/migration-guardrail/README.md` before applying any of it. The
+preconditions there are real — without OpenShift GitOps >= 1.11 the operator
+reconciles its default role back and the guard rail silently does nothing.
+
 ### The §0 trim
 
 Apply §0.4 **step 1** (add `mce.yaml`/`hc.yaml` alongside `config.yaml`) and
@@ -1052,6 +1089,7 @@ team-repo root README, and `defaults/mces/README.md`. Copy the updated
 | **(E)** day1 file carries a platform key (`hub:`, `env:`, `site:`…) | silently becomes a chart value; a truthy `hub:` drops the `defaults/hosted-clusters` generator for that cluster | E.0 precondition 4 grep, before the platform MR |
 | **(E)** day1 tag bumped before the `versions/ocp-<new>/` layer exists | pinned charts silently fall back to the team default | layers are per-**exact** version now: create the layer, then flip the tag (R1/R2) |
 | Removing an old glob before the folder moved | that folder's apps deleted for a window | add-first ordering (C'), remove only after the move lands |
+| Human cascade-deletes an app while the tree is churning | that app's workloads torn down — the one deletion path the no-finalizer model does not cover | optional delete guard rail (`tools/migration-guardrail/`), on before C and off after E |
 | "Fixing" the frozen `namespace:` line while in there | fleet-wide app identity change → delete/recreate | explicitly frozen |
 | `targetRevision` in a `defaults/*` config | silently overrides every stream pin for that chart | README rule: defaults configs carry repourl/namespace/syncPolicy; pins live in `operators/` |
 
