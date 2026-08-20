@@ -1,5 +1,13 @@
 # The sites/ refactor — changes to apply in the air-gapped repos
 
+> **Already finished the migration?** If your repos are at the end state of
+> Phases A → E (the `sites/` tree, no marker files, versions from day1), the
+> only things left here are **Phase F** (the structural opt-out) and **Phase G**
+> (checks in CI) — and neither is a migration step. Use
+> **[`APPLY-EXCLUSIONS.md`](APPLY-EXCLUSIONS.md)**: same per-file hunk format,
+> just those two phases, with the preconditions to confirm you really are at
+> the end state. Read F and G below for *why*; read that file to *apply*.
+
 This hand-off migrates the day2 repos to the architecture in
 `REFACTOR-PLAN.md` (deep dive: `ARCHITECTURE.md`):
 
@@ -16,14 +24,20 @@ This hand-off migrates the day2 repos to the architecture in
   layers (`hosted-clusters` is NEW: deploy a chart to every hosted cluster).
 - `day2.gitops/*` labels on every generated Application — bulk operations by
   selector (`argocd app sync -l day2.gitops/env=prod,day2.gitops/chart=ako`).
+- **(Phase F)** `defaults/<scope>/exclusions.yaml` — the one structural
+  opt-out, letting a fleet default skip named clusters. Optional per team, and
+  absent is the normal state.
+- **(Phase G)** every consistency check behind one CI command, in both repo
+  roles. Phase F's rules fail silently at runtime, which is what makes the
+  pipeline load-bearing rather than nice-to-have.
 
 **Everything below was implemented and render-verified in the mock repo**
 (commit history mirrors the phase order — one commit per step below).
 Helm-render verified, **not live-verified**: `helm template` does not execute
 git generators; the offline harness (`tools/render-verify/render_chain.py`,
-copy it across; it hardcodes `GROUP = "redbull"` near the top — set it to the
-team whose repo you are verifying, and from Phase E on it also needs a day1
-checkout: `--day1 ROOT`, defaulting to `../gitops-day1/platform-config`)
+copy it across — from Phase E on it needs a day1 checkout, and after Phase G
+every input is a flag: `--group NAME --sigs ROOT --platform ROOT --day1 ROOT`,
+all defaulting to a single-checkout mock layout)
 simulates the documented generator params
 and asserts, per phase, that all 35 generated apps keep identical names, destinations,
 releaseNames, syncPolicies and identical *resolved value-file content
@@ -224,8 +238,16 @@ leaves the marker files with nothing to carry, so they are deleted and
 discovery goes back to depth-exact `directories:` generators. The §0 rename and
 all of Phase D become work you would throw away.
 
-**The remaining sequence is `§0 (steps 1–2 only) → C → C' → E`. Phase D is
-skipped.**
+**The remaining sequence is `§0 (steps 1–2 only) → C → C' → E → F → G`. Phase
+D is skipped.**
+
+Phases **F** and **G** were added later (2026-08-20) and are **independent of
+the migration**: F is a new capability, not a step of the `sites/` refactor,
+and G is tooling. A repo that has already finished through E can apply them on
+their own — **`APPLY-EXCLUSIONS.md` is that standalone, per-file apply guide**,
+and it is the document to use if the migration is already behind you. Read F
+and G below for the reasoning; read `APPLY-EXCLUSIONS.md` to actually apply
+them.
 
 | Phase | Status for the air-gap | Why |
 |---|---|---|
@@ -234,7 +256,9 @@ skipped.**
 | Phase C (trees → `sites/`) | **required, unchanged** | E builds the day1 lookup from `path[1]` = site; the legacy `mces/<mce>/` layout has no site segment, and the harness now refuses that layout outright |
 | Phase C' (defaults renames + hosted-clusters layer) | **required, unchanged** | independent of the version change |
 | Phase D (drop legacy glob; env/site from path; strip marker fields) | **skip — subsumed by E** | E.2 replaces the generator wholesale with one `sites/` `directories:` entry, env/site already from `path[1]`/`path[2]`; E.3 deletes the markers instead of editing their fields; D.2's README refresh is E.4 |
-| Phase E | **the new end state** | versions from day1, markers deleted |
+| Phase E | **the end state of the migration** | versions from day1, markers deleted |
+| Phase F (structural opt-out) | **independent — apply any time after E** | a new capability, not a migration step. Standalone guide: `APPLY-EXCLUSIONS.md` |
+| Phase G (checks in CI) | **independent — apply any time after F** | tooling; makes F's silent failure modes catchable. Same guide |
 
 ### Optional: the delete guard rail
 
