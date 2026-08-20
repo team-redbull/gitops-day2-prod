@@ -1,0 +1,59 @@
+# Reference pipeline for a PLATFORM repo MR
+#   redbull/gitops-day2-prod/argocd-day2-platform.git
+#
+# Same two jobs as the sigs pipeline with the roles swapped: the platform tree
+# is the MR, and one or more representative sigs repos are cloned at main. A
+# platform change is fleet-wide, so render it against every sigs repo you can
+# afford to — REPRESENTATIVE_SIGS is a space-separated list of team names.
+#
+# See tools/ci/README.md for preconditions and for why `review` is allow_failure.
+
+.day2_render:
+  image: $DAY2_RENDER_IMAGE
+  variables:
+    GIT_STRATEGY: clone
+    REPRESENTATIVE_SIGS: "redbull"
+    SIGS_BASE: https://$GITLAB_HOST/redbull/gitops-day2-prod/sigs
+    DAY1_URL: https://$GITLAB_HOST/redbull/gitops-day1/platform-config.git
+  before_script:
+    - git clone --depth 1 -b main "$DAY1_URL" /tmp/day1
+    - for t in $REPRESENTATIVE_SIGS; do
+        git clone --depth 1 -b main "$SIGS_BASE/$t.git" "/tmp/sigs-$t";
+      done
+    - RENDER="$CI_PROJECT_DIR/tools/render-verify/render_chain.py"
+
+# BLOCKING. Fails if the MR's templates break ANY represented team.
+lint:
+  extends: .day2_render
+  stage: test
+  script:
+    - for t in $REPRESENTATIVE_SIGS; do
+        echo "== $t ==";
+        python3 "$RENDER" snapshot --out "/tmp/mr-$t"
+          --group "$t" --sigs "/tmp/sigs-$t"
+          --platform "$CI_PROJECT_DIR" --day1 /tmp/day1;
+      done
+
+# INFORMATIONAL. platform@MR vs platform@target, per team. This is the job that
+# proves a platform change is inert where it should be — e.g. the exclusion
+# feature must render `35 -> 35, IDENTITY OK` for any team with no
+# exclusions.yaml.
+review:
+  extends: .day2_render
+  stage: test
+  allow_failure: true
+  script:
+    - git fetch origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+    - git worktree add /tmp/platform-target FETCH_HEAD
+    - for t in $REPRESENTATIVE_SIGS; do
+        echo "== $t ==";
+        python3 "$RENDER" snapshot --out "/tmp/mr-$t"
+          --group "$t" --sigs "/tmp/sigs-$t"
+          --platform "$CI_PROJECT_DIR" --day1 /tmp/day1 || true;
+        python3 "$RENDER" snapshot --out "/tmp/base-$t"
+          --group "$t" --sigs "/tmp/sigs-$t"
+          --platform /tmp/platform-target --day1 /tmp/day1 || true;
+        python3 "$RENDER" compare "/tmp/base-$t" "/tmp/mr-$t";
+      done
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"

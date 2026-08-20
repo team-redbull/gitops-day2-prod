@@ -1857,7 +1857,9 @@ Refresh from the mock: `ARCHITECTURE.md` (discovery contract — including the
 caveat — version management, labels, runbooks R1/R2/R6/R7/R9, invariants
 checklist), the team-repo root README, and `defaults/mces/README.md`. Copy the updated
 `render_chain.py` across — it takes a new `--day1 ROOT` (default
-`../gitops-day1/platform-config`) and still hardcodes `GROUP`.
+`../gitops-day1/platform-config`). (`GROUP` was hardcoded at the time of
+Phase E; Phase G below makes it `--group`, along with `--sigs` and
+`--platform`.)
 
 ---
 
@@ -2077,6 +2079,94 @@ and the four rules. `defaults/mces/README.md` mirrors it with MCE names.
 Rule 3 fails if you create the file. `ARCHITECTURE.md` gains §2.2, the control
 bucket and the exclusion lints in §6-5, the XOR carve-out in §6-4 and the
 invariants checklist, and runbook **R10**.
+
+---
+
+## Phase G — every check in CI (2026-08-20)
+
+Phase F added a rule class whose failures are **silent at runtime**: a typo'd
+chart or cluster name in `exclusions.yaml` renders fine, generates fine, and
+quietly keeps deploying. The harness is the only thing that catches it, and
+until now the harness was something a human remembered to run. Phase G makes it
+a pipeline.
+
+The good news is how little was needed. `snapshot` **already exits 1 on any
+check failure**, so a lint job is `snapshot` with the output discarded — no new
+subcommand. What blocked CI was that the harness could only run in this mock.
+
+### G.1 — three changes make it CI-runnable
+
+`GROUP = "redbull"` was a module constant, and `SIGS` / `PLATFORM` were derived
+from the mock's single-repo layout. In the air-gapped env those are three
+separate GitLab projects.
+
+1. **`--group`** (default `redbull`) replaces the module constant. In a sigs
+   pipeline this is `$CI_PROJECT_NAME`, which **is** the team name — the
+   `scmProvider` generator in the groups appset names teams by repo, so the two
+   are the same string by construction.
+2. **`--sigs` and `--platform`** path flags, defaulting to today's mock-derived
+   values, so nothing in the mock changes.
+3. **`--day1`** already existed. All three checkouts are now validated up front:
+   a missing one exits 2 with the flag to pass, never a traceback.
+
+Verified: with defaults, and with all four flags passed explicitly, the
+snapshot is identical to the pre-change one — `33 -> 33, IDENTITY OK`.
+
+### G.2 — what the one command then checks
+
+| check | what it catches |
+|---|---|
+| **exclusion Rules 0–3** (F.1) | a chart name or cluster name in `exclusions.yaml` that doesn't exist; a stray key; a hub file |
+| **day1 parity** | an MCE or hosted-cluster folder with no day1 `mastertag` — i.e. **a stray folder that would become a phantom Application** |
+| **DUPLICATE app** | THE ONE INVARIANT — two generators emitting one app name (the XOR rule) |
+| **DEPTH-AMBIGUOUS `files:` glob** | the §0 prod incident — a `files:` glob matching deeper than intended |
+| **unsubstituted `{{ }}`** | a placeholder that survived into a generated app |
+| **frozen lines** | someone "fixing" `namespace: gitops-{{ .Values.repository }}`, which would rename every app |
+| **env allow-list / unknown `$ref` / render abort** | a typo'd env folder; a bad `$values`/`$day1` prefix; a chart that won't render |
+
+`compare` adds the second half: render the target branch, render the MR branch,
+diff. HARD on apps disappeared, identity changes (name, namespace, project,
+destination, repoURL, releaseName, syncPolicy), ref sources removed, or the
+resolved **sigs** value-file content stack changing.
+
+### G.3 — pipeline shape (two jobs, both repo roles)
+
+`render_chain.py` **moves to — or is mirrored into — the platform repo** in the
+air-gapped env, since it is platform tooling that sigs pipelines consume. (In
+this mock it stays at `tools/render-verify/`, which is outside
+`argocd-day2-platform/` only because the mock keeps all three repos in one
+checkout.)
+
+- **sigs repo MR** (`.../sigs/<team>.git`): clone platform@main + day1@main;
+  `snapshot` the MR branch (lint gate), then `snapshot` the target branch and
+  `compare` (review gate).
+- **platform repo MR** (`argocd-day2-platform.git`): the same two jobs with the
+  roles swapped — clone day1@main and one or more representative sigs repos,
+  render platform@MR vs platform@target.
+
+**`lint` blocks; `review` is informational** (`allow_failure: true`). A
+deliberate exclusion or decommission *is* an `APPS DISAPPEARED`, so a red
+`review` is a diff a human reads and approves, not an automatic defect. Do not
+invert this: a blocking `compare` makes every intentional removal unmergeable,
+and a non-blocking `lint` lets a silent typo through.
+
+Reference `.gitlab-ci.yml` fragments for both roles ship at **`tools/ci/`**.
+
+### G.4 — preconditions, unverifiable from the mock
+
+The mock cannot host three real pipelines, so the fragments are a hand-off
+artifact rather than something proven end to end. Two things must be confirmed
+in the air-gapped env before adopting them:
+
+1. **`helm` on the runners** (or a runner image that carries it, plus `python3`
+   and `PyYAML`).
+2. **Read tokens for cross-project clones** — each job clones the other two
+   projects.
+
+If cross-project cloning is not available, the lint job still works standalone
+on a sigs repo for the exclusion rules and the env allow-list — but day1
+parity, the duplicate check and `compare` all require the other checkouts, so a
+standalone run is not the full gate.
 
 ---
 

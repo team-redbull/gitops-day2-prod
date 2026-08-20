@@ -35,8 +35,14 @@ This simulates the documented ApplicationSet generator parameters only
 pre-merge gate, not a substitute for live Argo verification.
 
 Usage:
-  render_chain.py snapshot --out DIR [--repo ROOT] [--day1 ROOT]
+  render_chain.py snapshot --out DIR [--repo ROOT] [--group NAME]
+                           [--sigs ROOT] [--platform ROOT] [--day1 ROOT]
   render_chain.py compare OLD_DIR NEW_DIR
+
+In this mock the three repos are subdirectories of one checkout, which is what
+the flag defaults describe. In the air-gapped env they are three separate
+GitLab projects, so CI passes --sigs / --platform / --day1 explicitly and
+--group $CI_PROJECT_NAME. Reference pipeline fragments: tools/ci/.
 """
 
 import argparse
@@ -62,10 +68,16 @@ SIGS_MARKER = "/sigs/"
 # sequence in compare — see the module docstring.
 CONTROL_FILES = {"defaults/hosted-clusters/exclusions.yaml",
                  "defaults/mces/exclusions.yaml"}
-GROUP = "redbull"
 ENVS_ALLOWED = {"prod", "prep", "test"}
 
-REPO = None  # set in main
+# All four are set in main(). In this mock the three repos are subdirectories
+# of one checkout; in the air-gapped env they are three separate GitLab
+# projects, so every one of them is a flag with a mock-shaped default. GROUP is
+# the team name, which in a sigs pipeline is $CI_PROJECT_NAME — the scmProvider
+# generator names teams by repo, so the two are the same string by
+# construction.
+GROUP = None
+REPO = None
 SIGS = None
 PLATFORM = None
 DAY1 = None  # gitops-day1/platform-config checkout: the version source of truth
@@ -746,12 +758,27 @@ def compare(old_dir, new_dir):
 
 
 def main():
-    global REPO, SIGS, PLATFORM, DAY1
-    ap = argparse.ArgumentParser()
+    global GROUP, REPO, SIGS, PLATFORM, DAY1
+    ap = argparse.ArgumentParser(
+        description="Render-verify the day2 platform chain. `snapshot` exits 1 "
+                    "on any consistency failure, so a CI lint job is just "
+                    "`snapshot` with the output discarded.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("snapshot")
     s.add_argument("--out", required=True)
-    s.add_argument("--repo", default=None)
+    s.add_argument("--repo", default=None,
+                   help="mock checkout holding all three repos; only used to "
+                        "derive the defaults of --sigs and --platform")
+    s.add_argument("--group", default="redbull",
+                   help="team name. In a sigs pipeline this is $CI_PROJECT_NAME "
+                        "— the scmProvider generator names teams by repo "
+                        "(default: %(default)s)")
+    s.add_argument("--sigs", default=None,
+                   help="sigs repo checkout for --group (default: "
+                        "<repo>/sigs/<group>)")
+    s.add_argument("--platform", default=None,
+                   help="argocd-day2-platform checkout (default: "
+                        "<repo>/argocd-day2-platform)")
     s.add_argument("--day1", default=None,
                    help="gitops-day1/platform-config checkout (the OCP version "
                         "source of truth); defaults to ../gitops-day1/platform-config")
@@ -760,23 +787,31 @@ def main():
     c.add_argument("new")
     args = ap.parse_args()
 
-    REPO = args.repo if getattr(args, "repo", None) else \
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    SIGS = os.path.join(REPO, "sigs", GROUP)
-    PLATFORM = os.path.join(REPO, "argocd-day2-platform")
-
-    if args.cmd == "snapshot":
-        DAY1 = os.path.abspath(args.day1) if args.day1 else os.path.normpath(
-            os.path.join(REPO, "..", "gitops-day1", "platform-config"))
-        if not os.path.isdir(DAY1):
-            print(f"day1 platform-config checkout not found: {DAY1}\n"
-                  f"Every cluster's OCP version (`mastertag`) is read from it — "
-                  f"clone it next to this repo or pass --day1 ROOT.",
-                  file=sys.stderr)
-            sys.exit(2)
-        sys.exit(take_snapshot(args.out))
-    else:
+    if args.cmd == "compare":
         sys.exit(compare(args.old, args.new))
+
+    GROUP = args.group
+    REPO = args.repo if args.repo else \
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    SIGS = os.path.abspath(args.sigs) if args.sigs \
+        else os.path.join(REPO, "sigs", GROUP)
+    PLATFORM = os.path.abspath(args.platform) if args.platform \
+        else os.path.join(REPO, "argocd-day2-platform")
+    DAY1 = os.path.abspath(args.day1) if args.day1 else os.path.normpath(
+        os.path.join(REPO, "..", "gitops-day1", "platform-config"))
+
+    for label, path, why in (
+        ("sigs repo", SIGS, f"the team tree for group {GROUP!r} — pass --sigs ROOT"),
+        ("platform repo", PLATFORM, "the day2 platform charts — pass --platform ROOT"),
+        ("day1 platform-config", DAY1,
+         "every cluster's OCP version (`mastertag`) is read from it — clone it "
+         "next to this repo or pass --day1 ROOT"),
+    ):
+        if not os.path.isdir(path):
+            print(f"{label} checkout not found: {path}\n{why}", file=sys.stderr)
+            sys.exit(2)
+
+    sys.exit(take_snapshot(args.out))
 
 
 if __name__ == "__main__":

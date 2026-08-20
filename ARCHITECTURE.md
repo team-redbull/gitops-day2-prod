@@ -722,10 +722,20 @@ Argo, hub-scoped against prod-hub. A bare `ocp-version=4.20.9` sweeps MCE hubs
    python3 tools/render-verify/render_chain.py compare /tmp/before /tmp/after
    ```
 
-   `snapshot` needs a checkout of the **day1** repo — every destination's
-   version is read from it. It defaults to `../gitops-day1/platform-config`
-   next to this repo; override with `--day1 ROOT`. Without one it refuses to
-   run rather than guess.
+   `snapshot` needs all three checkouts — the sigs tree, the platform charts
+   and the **day1** repo, which every destination's version is read from. In
+   this mock all three are derived from one checkout; pass `--group NAME`,
+   `--sigs ROOT`, `--platform ROOT` and `--day1 ROOT` when they are separate
+   projects, as they are in the air-gapped env. A missing checkout exits 2
+   naming the flag to pass, rather than guessing.
+
+   **`snapshot` exits 1 on any check failure**, so a CI lint job is just
+   `snapshot` with the output discarded — no separate lint command exists or is
+   needed. Reference GitLab CI fragments for both repo roles (sigs MR and
+   platform MR) ship at `tools/ci/`. `lint` blocks; the `compare` job is
+   informational, because a deliberate exclusion or decommission legitimately
+   shows up as `APPS DISAPPEARED` and needs a human to approve it, not a gate
+   to forbid it.
 
    `compare` splits every app's resolved value files by repo, because the two
    have opposite expectations:
