@@ -1,0 +1,45 @@
+# Structural opt-out for the fleet-default charts in this folder.
+#
+# Every chart folder in defaults/mces/ is deployed to the in-cluster of EVERY
+# MCE hub of this team. This file is the one way to carve out exceptions: it
+# names, per chart, the MCEs that must NOT get it. It is a plain file, so the
+# directory generator that discovers chart folders never sees it.
+#
+# Absent is the normal state — a team with no exceptions simply has no such
+# file. See defaults/mces/README.md ("Structural opt-out") for why the data
+# cannot live per-chart, and ARCHITECTURE.md R10 for the procedure.
+#
+# Four rules, enforced by tools/render-verify/render_chain.py before merge:
+#
+#   0. `exclusions` is the ONLY top-level key. This file is merged into the
+#      operators chart's values, so any other key becomes a real chart value
+#      (a stray `mastertag` here would be an OCP version, not a comment).
+#   1. Every key names a chart folder in THIS directory. A new fleet chart
+#      that ships with exclusions means the chart folder and its entry land in
+#      the SAME commit: chart-first deploys it to the excluded MCE for one
+#      sync interval, entry-first fails this rule.
+#   2. Every listed name is a real MCE — the folder basename under
+#      sites/<site>/<env>/mces/, never `in-cluster`.
+#   3. There is no defaults/hub/exclusions.yaml. The hub is one cluster and
+#      never flows through the operators chart; delete the chart folder.
+#
+# Rules 1 and 2 both exist because the two typos fail differently and BOTH ARE
+# SILENT: a wrong chart name emits an exclude matching no folder, so the chart
+# still deploys; a wrong MCE name matches no destination, so no exclude is
+# emitted at all. The lint is the enforcement, not hygiene.
+#
+# Excluded on every MCE? Then it is not a fleet default — delete the chart
+# folder instead.
+#
+# Needs different VALUES rather than absence? Use values-<mce>.yaml in the
+# chart's folder. An exclusion is the heavier tool.
+#
+# THIS DOES NOT TEAR DOWN AN EXISTING DEPLOYMENT. Platform apps are
+# prune: false with no resources-finalizer, so removing a chart here deletes
+# the wrapper Application and leaves its -deploy child and the running
+# workload orphaned in place. Exclusion is prevention. For teardown, and for
+# the undo, follow runbook R10 in ARCHITECTURE.md.
+
+exclusions:
+  dhcp-api-token:
+    - ocp4-prep-mce-site1-a
