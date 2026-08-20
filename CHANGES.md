@@ -323,8 +323,46 @@ flattened `mces/in-cluster-defaults/` (chart folders directly under it, static
 - Skip the `in-cluster/` → `defaults/hub/` rename in Phase C' — create
   `defaults/hub/` directly and ship `inClusterAppset.yaml` already pointing at
   `defaults/hub/*` (its Phase C'.4 form), together with the rest of Phase B.
-- `mces/in-cluster-defaults/` exists in prod either way (it carries
-  `dhcp-api-token`) — its rename to `defaults/mces/` cannot be skipped.
+- `mces/in-cluster-defaults/` may or may not exist per team (see below).
+
+> **The collapsed variant is a FLEET-WIDE option, not a per-repo one.** The
+> platform repo is shared by every team, so shipping `inClusterAppset.yaml`
+> straight in its C'.4 form is only valid if **no** team repo still has a
+> top-level `in-cluster/`. If even one does, take the normal C'.1 → C'.2 →
+> C'.4 dual-glob path; the repos that never had the folder simply satisfy
+> C'.2 vacuously.
+
+### Not every team repo has `in-cluster/` and `mces/in-cluster-defaults/`
+
+Confirmed in the air-gapped fleet (2026-08-20): **only some** sigs repos carry
+these two folders. That is fine — a team with neither is a *supported* state,
+not a repo to fix. Nothing in the generated-app flow depends on their
+existence:
+
+- A `directories:` glob that matches nothing yields **zero generator params**
+  (C'.1) — no app, no error, no degraded state. That applies to
+  `in-cluster/*`, `defaults/hub/*`, `mces/in-cluster-defaults/*`,
+  `defaults/mces/*` and `defaults/hosted-clusters/*` alike.
+- Every `defaults/…` valueFile slot added in C'.1 sits under
+  `ignoreMissingValueFiles: true` in all three templates, so an absent folder
+  resolves to nothing.
+- The XOR invariant of C'.2/C'.3 ("exactly one of the two folders exists") is
+  satisfied vacuously when **neither** exists: both globs match nothing, so
+  there is no app to duplicate and none to orphan.
+- Phase B's deletion of the `mces/in-cluster-defaults` **exclude** entry is
+  dead-code removal in a repo that never had the folder.
+- Same for the *per-MCE* `mces/<mce>/in-cluster/` folder, if that is the one
+  your repo is missing: `operators.yaml` gen-1 (`{{ .Values.clusterPath }}/*`)
+  yields zero apps, gen-2 (`defaults/mces/*`) is a **separate generator in the
+  same list** and still fires, the static `<group>-in-cluster` Application
+  renders as always, and `clustersAppset`'s `exclude:` of a folder that is not
+  there is a no-op. No step changes for it.
+
+What DOES change for such a repo is three mechanical instructions — a bare
+`git mv` of a folder that is not there fails with `fatal: bad source`. The
+adjusted commands are inline at **C'.2** and **C'.3**; read them before
+running either step. Everything else (Phases A, B, C, C'.1, C'.4, D, E) is
+byte-for-byte the same.
 
 Two standing warnings carried forward from the previous hand-off:
 
@@ -985,6 +1023,25 @@ $ git add -A && git commit -m "in-cluster -> defaults/hub; add defaults/hosted-c
   `in-cluster/example-chart/values.yaml` → the same three under
   `defaults/hub/`, plus the new `defaults/hosted-clusters/README.md`.
 
+> **Repo with no top-level `in-cluster/`** (some teams in the air-gapped
+> fleet — see "Baseline assumption"): there is nothing to rename, and a bare
+> `git mv` fails with `fatal: bad source`. Create the folder instead, with the
+> same README trick that makes `defaults/hosted-clusters/` real:
+>
+> ```console
+> $ mkdir -p defaults/hub defaults/hosted-clusters
+> $ cp <mock>/defaults/hub/README.md defaults/hub/
+> $ cp <mock>/defaults/hosted-clusters/README.md defaults/hosted-clusters/
+> $ git add -A && git commit -m "add defaults/hub + defaults/hosted-clusters"
+> ```
+>
+> Both folders then hold only plain files, which `directories:` generators
+> ignore ⇒ **zero apps generated, zero apps deleted** — the commit is inert on
+> the fleet. Creating them is optional (a missing folder is equally fine); do
+> it anyway so every team repo has the same shape and the next chart has a
+> place to land. The XOR invariant is satisfied vacuously here, so this step
+> does **not** have to be a single commit for such a repo.
+
 ### C'.3 — sigs: `git mv mces/in-cluster-defaults defaults/mces` (one commit)
 
 ```console
@@ -998,6 +1055,19 @@ $ git add -A && git commit -m "mces/in-cluster-defaults -> defaults/mces"
 ⇒ in-place update; its deploy config resolves from the new path with
 identical content. The legacy `mces/` directory is now empty and disappears
 from git.
+
+> **Repo with no `mces/in-cluster-defaults/`:** same story as C'.2 — the
+> `git mv` would fail, so create the target instead and skip the `ls mces/`
+> check (that repo's `mces/` is already gone, removed by Phase C):
+>
+> ```console
+> $ mkdir -p defaults/mces
+> $ cp <mock>/defaults/mces/README.md defaults/mces/
+> $ git add -A && git commit -m "add defaults/mces"
+> ```
+>
+> The `prune: true` caveat below is about `dhcp-api-token` specifically — it
+> does not apply to a repo that never carried the chart.
 
 > This is the one commit in the whole refactor that touches a chart with
 > `prune: true` on itself (`dhcp-api-token`). The app is updated in place, not
