@@ -27,6 +27,15 @@ spec:
       path: operators
       helm:
         ignoreMissingValueFiles: true
+        # This app's FIRST $values reference. The team's fleet-default opt-out
+        # matrix is a generation input, not workload config — the operators
+        # chart turns it into `exclude:` entries in its defaults/mces
+        # generator. Absent file -> nothing resolves (ignoreMissingValueFiles)
+        # -> no exclusions, which is the normal state. The inline values below
+        # are applied after valueFiles, so `mastertag` cannot be shadowed from
+        # here.
+        valueFiles:
+          - '$values/defaults/mces/exclusions.yaml'
         values: |
           group: '{{ .Values.group }}'
           mce: {{ .Values.mce }}
@@ -39,6 +48,9 @@ spec:
           # derives it the same way for hosted clusters, so there is exactly
           # one derivation rule in the chain.
           mastertag: '{{ $mastertag }}'
+    - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+      targetRevision: main
+      ref: values
   destination:
     name: in-cluster
     namespace: gitops-{{ .Values.group }}

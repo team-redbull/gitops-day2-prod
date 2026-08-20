@@ -12,10 +12,23 @@ For every generated Application it records identity fields, labels and the
 ordered sequence of *existing* value files (path + content hash) the app
 resolves. Value files come from TWO repos: the sigs repo ($values) and the
 day1 platform-config repo ($day1), which owns every cluster's OCP version as
-`mastertag`. Snapshots taken before/after a change are compared with
-`compare`: identity fields and the sigs-resolved content sequence must be
-equal; everything else (labels, valueFiles path strings, extra ref sources,
-day1 versions) is reported as an expected/informational diff.
+`mastertag`. Resolved files land in one of THREE buckets:
+
+  sigs     workload config -> a change here changes what a workload renders
+                              -> HARD
+  day1     cluster OCP versions -> this is where versions are SUPPOSED to
+                              change -> INFO
+  control  CONTROL_FILES: the fleet-default exclusion matrices, which decide
+                              whether an Application EXISTS rather than what it
+                              renders. Hashing them into the sigs sequence
+                              would raise a HARD diff on every app in the team
+                              for a change whose real effect is a two-line
+                              APPS DISAPPEARED -> INFO
+
+Snapshots taken before/after a change are compared with `compare`: identity
+fields and the sigs-resolved content sequence must be equal; everything else
+(labels, valueFiles path strings, extra ref sources, day1 versions, control
+files) is reported as an expected/informational diff.
 
 This simulates the documented ApplicationSet generator parameters only
 ({{path}}, {{path.basename}}, {{path[n]}}, flattened file keys). It is a
@@ -41,6 +54,14 @@ import yaml
 
 PLATFORM_MARKER = "argocd-day2-platform.git"
 SIGS_MARKER = "/sigs/"
+# Fleet-default opt-out matrices: inputs to GENERATION, not to a workload's
+# values — they decide whether an Application is created at all. One fixed
+# path per scope, because the template that consumes them (the operators
+# chart) only ever sees Helm values: chart folder names are discovered from
+# git at generator time and never reach it. Bucketed away from the sigs
+# sequence in compare — see the module docstring.
+CONTROL_FILES = {"defaults/hosted-clusters/exclusions.yaml",
+                 "defaults/mces/exclusions.yaml"}
 GROUP = "redbull"
 ENVS_ALLOWED = {"prod", "prep", "test"}
 
@@ -272,6 +293,8 @@ def resolve_value_files(value_files):
         else:
             root, rel, repo = SIGS, vf, "sigs"
         rel = posixpath.normpath(rel)
+        if repo == "sigs" and rel in CONTROL_FILES:
+            repo = "control"
         full = os.path.join(root, rel)
         if os.path.isfile(full):
             with open(full, "rb") as fh:
@@ -478,6 +501,109 @@ def lint_sigs_tree():
                      f"source of truth; delete the stale marker value")
 
 
+def lint_exclusions():
+    """Rules 0-3 on defaults/<scope>/exclusions.yaml — the structural opt-out.
+
+    A typo here is SILENT everywhere else in the chain: Helm renders, the
+    generator runs, and the chart keeps deploying. The two typo axes fail
+    differently, which is why BOTH name rules exist —
+
+      wrong CHART name   -> an `exclude:` path matching no folder. The include
+                            glob still emits the real chart, so it DEPLOYS to
+                            the cluster someone asked to opt out.  (Rule 1)
+      wrong TARGET name  -> `has` is false for every cluster, so no exclude
+                            entry is emitted anywhere at all.       (Rule 2)
+
+    Absent is the normal state: most teams never write either file, and many
+    sigs repos carry neither defaults folder. Skip silently.
+    """
+    # Rule 3 — the hub is not a fleet scope. A file here is inert: the hub flow
+    # is mces/inClusterAppset -> deploy and never passes through the operators
+    # chart, the only template that reads an exclusion matrix.
+    if os.path.isfile(os.path.join(SIGS, "defaults/hub/exclusions.yaml")):
+        fail("defaults/hub/exclusions.yaml: Rule 3 — there are no hub "
+             "exclusions. The hub is a single cluster and its charts never "
+             "flow through the operators chart, so nothing would ever read "
+             "this file. To stop deploying a hub chart, delete its folder.")
+
+    known = {
+        "defaults/mces": ("MCE", sorted(
+            posixpath.basename(d) for d in match_dirs("sites/*/*/mces/*"))),
+        "defaults/hosted-clusters": ("hosted cluster", sorted(
+            {posixpath.basename(d) for d in match_dirs("sites/*/*/mces/*/*")}
+            - {"in-cluster"})),
+    }
+
+    for scope, (kind, names_known) in sorted(known.items()):
+        rel = f"{scope}/exclusions.yaml"
+        full = os.path.join(SIGS, rel)
+        if not os.path.isfile(full):
+            continue                     # absent is the normal state
+
+        # Rule 0 — schema. This file is merged into the operators chart's
+        # values, so a stray top-level key does not sit there as a comment: it
+        # lands as a chart value (a stray `mastertag` would be an OCP version).
+        try:
+            with open(full) as fh:
+                doc = yaml.safe_load(fh)
+        except yaml.YAMLError as e:
+            fail(f"{rel}: Rule 0 — not parseable as YAML: {e}")
+            continue
+        doc = doc if doc is not None else {}
+        if not isinstance(doc, dict):
+            fail(f"{rel}: Rule 0 — the top level must be a mapping carrying the "
+                 f"single key `exclusions`, got {type(doc).__name__}")
+            continue
+        stray = sorted(set(doc) - {"exclusions"})
+        if stray:
+            fail(f"{rel}: Rule 0 — `exclusions` must be the ONLY top-level key; "
+                 f"found {stray}. Every other key is merged into the operators "
+                 f"chart's values, where it is a real chart value and not a "
+                 f"comment.")
+        ex = doc.get("exclusions")
+        if ex is None:
+            continue                     # declared but empty: legal and inert
+        if not isinstance(ex, dict):
+            fail(f"{rel}: Rule 0 — `exclusions` must be a map of <chart> -> "
+                 f"[{kind} names], got {type(ex).__name__}")
+            continue
+
+        charts = sorted(posixpath.basename(d) for d in match_dirs(f"{scope}/*"))
+        for chart, names in sorted(ex.items()):
+            # Rule 1 — chart names.
+            if chart not in charts:
+                fail(f"{rel}: Rule 1 — key {chart!r} is not a chart folder in "
+                     f"{scope}/ (have: {charts or 'none'}). It would render as "
+                     f'an exclude of "{scope}/{chart}", match no folder and '
+                     f"remove NOTHING, while the include glob still emits the "
+                     f"real chart — so it keeps deploying to the cluster that "
+                     f"asked to opt out. NOTE: a new fleet chart that ships "
+                     f"WITH exclusions means the chart folder and this entry "
+                     f"land in the SAME commit — chart-first deploys it to the "
+                     f"excluded cluster for one sync interval, entry-first "
+                     f"fails this rule.")
+            if names is None:
+                continue                 # listed, excluded nowhere: inert
+            if not isinstance(names, list):
+                fail(f"{rel}: Rule 0 — exclusions.{chart} must be a list of "
+                     f"{kind} names, got {type(names).__name__}")
+                continue
+            # Rule 2 — target names.
+            for n in names:
+                if not isinstance(n, str):
+                    fail(f"{rel}: Rule 0 — exclusions.{chart} entry {n!r} is a "
+                         f"{type(n).__name__}; every entry must be a {kind} "
+                         f"name (string)")
+                    continue
+                if n not in names_known:
+                    fail(f"{rel}: Rule 2 — {n!r} under exclusions.{chart} is not "
+                         f"a {kind} in this repo (have: {names_known or 'none'}). "
+                         f"It matches no destination, so NO exclude entry is "
+                         f"emitted anywhere at all and {chart} still deploys "
+                         f"fleet-wide — the failure is completely silent "
+                         f"without this rule.")
+
+
 def lint_frozen_lines():
     for f in ("mces/templates/mcesAppset.yaml", "mces/templates/appProjectAppset.yaml"):
         p = os.path.join(PLATFORM, f)
@@ -491,6 +617,10 @@ def lint_frozen_lines():
 def take_snapshot(out_dir):
     snapshot = {"apps": {}, "appsets": {}, "other": {}}
     lint_sigs_tree()
+    # BEFORE the render: a malformed exclusions file makes the operators chart
+    # `fail`, which collapses into a single `render aborted:` line. The precise
+    # rule message has to already be in CHECK_FAILURES by then.
+    lint_exclusions()
     lint_frozen_lines()
 
     # A chart that refuses to render (e.g. `required` on a version the day1
@@ -583,6 +713,13 @@ def compare(old_dir, new_dir):
         if _split(o, "day1") != _split(n, "day1"):
             info.append(f"{uid}: day1 version files {_split(o, 'day1')} -> "
                         f"{_split(n, 'day1')}")
+        # The exclusion matrix decides whether apps EXIST, not what they
+        # render. Its real effect shows up as APPS DISAPPEARED (HARD) on the
+        # handful of apps actually excluded — reporting the file's own hash as
+        # HARD would flag every app in the team for the same change.
+        if _split(o, "control") != _split(n, "control"):
+            info.append(f"{uid}: exclusion control file {_split(o, 'control')} "
+                        f"-> {_split(n, 'control')}")
         if o["labels"] != n["labels"]:
             info.append(f"{uid}: labels {o['labels']} -> {n['labels']}")
         if o["valueFiles"] != n["valueFiles"]:

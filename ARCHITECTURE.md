@@ -322,9 +322,9 @@ The full chain (each row renders the next):
 | mces | `mces/templates/mcesAppset.yaml` | **dirs**: `sites/*/*/mces/*` | App `<team>-<mce>` → `clusters` chart, destination = the MCE; passes `mce`, `mcePath`, `env`, `site` + a `$day1` value file = the MCE's `mastertag` | prod-hub |
 | app-projects | `mces/templates/appProjectAppset.yaml` | clusters (all) | AppProject `<team>` on every cluster (sync-wave −1) | prod-hub |
 | hub charts | `mces/templates/inClusterAppset.yaml` | dirs: `defaults/hub/*` | App `<team>-in-cluster-<chart>` → `deploy` chart in hub mode | prod-hub |
-| clusters | `clusters/templates/clustersAppset.yaml` | **dirs**: `<mcePath>/*`, minus `<mcePath>/in-cluster` | App `<team>-<cluster>` → `operators` chart + a `$day1` value file = **this cluster's** `mastertag` | the MCE |
-| — static | `clusters/templates/inClusterApp.yaml` | none (always rendered) | App `<team>-in-cluster` → `operators` chart with `cluster: in-cluster`; passes the **MCE's** `mastertag` down inline | the MCE |
-| operators | `operators/templates/operators.yaml` | dirs ×3: `<clusterPath>/*`; `defaults/mces/*` (in-cluster only); `defaults/hosted-clusters/*` (hosted only) | App `<team>-<cluster>-<chart>` → `deploy` chart | the MCE |
+| clusters | `clusters/templates/clustersAppset.yaml` | **dirs**: `<mcePath>/*`, minus `<mcePath>/in-cluster` | App `<team>-<cluster>` → `operators` chart + a `$day1` value file = **this cluster's** `mastertag`, and a `$values` one = `defaults/hosted-clusters/exclusions.yaml` (§2.2) | the MCE |
+| — static | `clusters/templates/inClusterApp.yaml` | none (always rendered) | App `<team>-in-cluster` → `operators` chart with `cluster: in-cluster`; passes the **MCE's** `mastertag` down inline, plus a `$values` value file = `defaults/mces/exclusions.yaml` (§2.2) | the MCE |
+| operators | `operators/templates/operators.yaml` | dirs ×3: `<clusterPath>/*`; `defaults/mces/*` (in-cluster only); `defaults/hosted-clusters/*` (hosted only). Each defaults generator also carries `exclude:` entries built from `.Values.exclusions` — the structural opt-out (§2.2) | App `<team>-<cluster>-<chart>` → `deploy` chart | the MCE |
 | deploy | `deploy/templates/deployApp.yaml` | — | App `<team>-<cluster>-<chart>-deploy` = **the workload**, destination `name: <cluster>` | the MCE |
 
 Three details carry the whole design:
@@ -442,6 +442,64 @@ cluster-side configuration and cannot silently regress.
 `render_chain.py` models both engines and fails the pre-merge check on any
 `files:` glob whose two readings differ, so this class of bug cannot reach a
 merge request again. That guard is kept even though nothing matches it today.
+
+### 2.2 The structural opt-out (`exclusions.yaml`)
+
+A fleet default is absolute by construction: every chart folder in
+`defaults/mces/` becomes an Application on **every** MCE hub, every folder in
+`defaults/hosted-clusters/` on **every** hosted cluster. `exclusions.yaml` is
+the one way to carve out a named set of exceptions.
+
+One plain file per scope, keyed by chart, directly under the defaults folder —
+where a `directories:` generator, which lists directories only, cannot see it:
+
+```yaml
+# sigs/<team>/defaults/mces/exclusions.yaml
+exclusions:
+  dhcp-api-token:
+    - ocp4-prep-mce-site1-a
+```
+
+**Absent is the normal state.** Most teams never write either file; a repo
+without one renders byte-for-byte what it rendered before the feature existed.
+
+**Why it cannot live per chart.** The decision *"does this chart become an
+Application here?"* is made by the `directories:` generator that
+`operators.yaml` renders, and chart folder names are discovered from git at
+**generator** time. `operators.yaml` is Helm, rendered by the repo-server
+*before* any chart name exists: it sees Helm values plus `valueFiles` at
+statically known paths, and has no git-listing primitive. (`goTemplate` is off
+repo-wide, so the appset `template:` block is flat fasttemplate — no
+conditionals there either.) So the data has to arrive as a value from **one
+fixed path per scope**, resolved by the parent Application:
+`clustersAppset.yaml` for hosted clusters, `inClusterApp.yaml` for MCE hubs —
+which is why both now carry a `$values` ref source. A per-chart file is only
+readable one layer lower, at `deploy`, where the app already exists.
+
+The Helm layer turns each matching pair into an `exclude: true` entry in that
+scope's generator — the same idiom `clustersAppset` already uses to drop
+`in-cluster`. Three constraints on those entries, and they are why the code
+looks the way it does:
+
+1. They sit in the **same `git:` generator block** as the include glob. Argo
+   computes `include && !exclude` **per generator**; an exclude in the sibling
+   `<clusterPath>/*` generator is a silent no-op.
+2. They match the include glob's output **byte-for-byte**.
+   `defaults/mces/*` yields `defaults/mces/dhcp-api-token`; a deeper path
+   removes nothing, silently.
+3. The two defaults generators are an `if/else` pair, so an MCE never
+   evaluates hosted-cluster exclusions and vice versa. No cross-scope leakage.
+
+**Malformed input fails the render on purpose.** A frozen render deletes
+nothing (§6-2), whereas silently ignoring a bad file would deploy a chart
+somewhere someone asked it not to. But a *well-formed* file naming a chart or
+a cluster that does not exist is **inert and completely silent** — that is what
+`render_chain.py`'s exclusion lint catches before merge, in CI. Both name axes
+need a rule because they fail differently: a wrong chart name emits an exclude
+matching no folder, so the chart still deploys; a wrong cluster name matches no
+destination, so no exclude entry is emitted at all.
+
+**Exclusion is prevention, not teardown** — see runbook **R10**.
 
 ## 3. The two value stacks (how a chart gets its configuration)
 
@@ -647,7 +705,12 @@ Argo, hub-scoped against prod-hub. A bare `ocp-version=4.20.9` sweeps MCE hubs
    emitted by exactly one generator entry. All the working rules derive from
    it: one-commit `git mv`, never copy-then-delete, the defaults XOR rule (a
    chart lives in a defaults folder OR a specific folder, never both),
-   add-glob-before-remove ordering during migrations.
+   add-glob-before-remove ordering during migrations. The XOR rule has exactly
+   one carve-out, and it does not weaken the invariant: a chart may sit in a
+   defaults folder *and* in a specific cluster's folder **iff** that cluster
+   is listed under it in `exclusions.yaml` (§2.2), which removes the fleet
+   entry — so the name is still emitted once. Without the entry it is still a
+   duplicate, and `render_chain.py` still fails on it.
 5. **Verify before merge — there is no after.** Platform apps self-heal, so
    a wrong render syncs immediately. The offline harness
    (`tools/render-verify/render_chain.py`) simulates the entire chain:
@@ -670,7 +733,13 @@ Argo, hub-scoped against prod-hub. A bare `ocp-version=4.20.9` sweeps MCE hubs
    - the **sigs** sequence is **HARD** — a change there changes what a
      workload renders;
    - the **day1** sequence is **INFO** — that is precisely where versions are
-     supposed to change.
+     supposed to change;
+   - the **control** sequence is **INFO** — the `defaults/<scope>/
+     exclusions.yaml` matrices (§2.2), which decide whether an Application
+     *exists* rather than what it renders. Their real effect lands as
+     `APPS DISAPPEARED` on the two or three apps actually excluded; hashing
+     them into the sigs sequence would instead raise a HARD diff on **every**
+     app in the team for that same two-line change.
 
    Identity (name, destination, releaseName, syncPolicy, repo/branch) stays
    HARD, as do disappearing apps. A value-only `ref:` source is **not**
@@ -679,7 +748,8 @@ Argo, hub-scoped against prod-hub. A bare `ocp-version=4.20.9` sweeps MCE hubs
 
    It also lints: env ∈ {prod,prep,test}, duplicate app names, leftover
    `{{...}}` placeholders, the frozen namespace line, depth-ambiguous `files:`
-   globs, and — the new one — **day1 parity**: every MCE and hosted-cluster
+   globs, the four **exclusion rules** (§2.2 — schema, chart names, cluster
+   names, no hub file), and — the new one — **day1 parity**: every MCE and hosted-cluster
    folder must have a day1 file carrying a `mastertag` matching
    `<major>.<minor>.<patch>[-<arch>]`. That lint is what turns a stray folder
    under an MCE into a pre-merge failure instead of a phantom Application
@@ -841,6 +911,64 @@ its folder removes the Secret on every MCE.
 Note the day1 side is independent: removing a cluster folder here stops day2
 from deploying to it, and leaves day1 (and the cluster) untouched.
 
+### R10. Exclude a fleet-default chart from one cluster
+
+The structural opt-out (§2.2). Use it when a chart must not exist on a named
+cluster at all; if it only needs to *behave* differently there, write
+`values-<cluster>.yaml` / `values-<mce>.yaml` instead.
+
+1. Edit `defaults/mces/exclusions.yaml` (MCE hubs) or
+   `defaults/hosted-clusters/exclusions.yaml` (hosted clusters). Create the
+   file if it is absent — absent is the normal state.
+
+   ```yaml
+   exclusions:
+     dhcp-api-token:
+       - ocp4-prep-mce-site1-a
+   ```
+
+2. CI runs the four rules plus `compare`. Until the pipeline exists in the
+   air-gapped env, run it by hand — `snapshot` exits 1 on any rule failure:
+
+   ```bash
+   python3 tools/render-verify/render_chain.py snapshot --out /tmp/after
+   python3 tools/render-verify/render_chain.py compare /tmp/before /tmp/after
+   ```
+
+   Expect `APPS DISAPPEARED` naming **two** apps per exclusion — the wrapper
+   and its `-deploy` leaf — and nothing else. **A typo on either axis is
+   silent everywhere else**: Helm renders, Argo generates, and the chart keeps
+   deploying. The lint is the enforcement, not hygiene.
+
+3. Merge. The wrapper Application is deleted. Per §6-2 there is no
+   `resources-finalizer`, so `<team>-<cluster>-<chart>-deploy` **and the
+   running workload are orphaned in place, not removed.**
+
+4. Only if you want the workload gone, and only **after** step 3 has
+   reconciled:
+
+   ```bash
+   argocd app delete <team>-<cluster>-<chart>-deploy --cascade
+   ```
+
+   **Order matters** — deleting it while the wrapper still exists gets it
+   recreated within a minute by the wrapper's `selfHeal: true`.
+
+**Undo:** delete the entry. The same-named wrapper reappears and re-adopts the
+orphaned `-deploy` app in place (§6-1/§6-2). Nothing is recreated.
+
+**Excluded everywhere?** Then it is not a fleet default — delete the chart
+folder instead (R8).
+
+**Full override** (one cluster needs a different `repourl` / `targetRevision`,
+not just different values): exclude the chart *and* create
+`<clusterPath>/<chart>/`. That pair is legal **only** with the exclusion —
+without it the two generators emit the same app name and CI fails on the
+duplicate.
+
+**Not for `defaults/hub/`.** One cluster, and it never flows through the
+operators chart; delete the chart folder. Rule 3 fails if the file exists.
+
 ### R9. Find things
 
 ```bash
@@ -878,7 +1006,13 @@ git log --oneline -- operators/ako/versions/ocp-4.20.9/
 - Discovery generators are `directories:`, never `files:` — a `directories:`
   glob is depth-exact, a `files:` glob is a git pathspec and is not (§2.1).
 - One `git mv` per move, one commit. Never copy-then-delete.
-- XOR: a chart lives in a defaults folder OR a specific folder. Never both.
+- XOR: a chart lives in a defaults folder OR a specific folder. Never both —
+  unless that cluster is named under it in `defaults/<scope>/exclusions.yaml`,
+  which removes the fleet entry and makes the pair a deliberate full override
+  (§2.2).
+- An `exclusions.yaml` key must name a real chart folder in its own defaults
+  directory, and every listed name a real MCE / hosted cluster. Both typos are
+  silent at runtime; CI is the only thing that catches them.
 - `repourl` all-lowercase in deploy configs.
 - Version branches are frozen; a fix is a new branch.
 - Pins live in `operators/`; defaults configs never carry `targetRevision`

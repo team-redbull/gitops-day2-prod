@@ -1861,6 +1861,225 @@ checklist), the team-repo root README, and `defaults/mces/README.md`. Copy the u
 
 ---
 
+## Phase F — structural opt-out for fleet-default charts (2026-08-20)
+
+Every chart folder in `defaults/mces/` deploys to **every** MCE hub of the
+team, every folder in `defaults/hosted-clusters/` to **every** hosted cluster.
+That is the point of a default, and until now it was absolute —
+`defaults/hosted-clusters/README.md` rule 4 said so outright: *"There is no
+structural opt-out for a single cluster."* The only lever was
+`values-<cluster>.yaml`, which changes a chart's **behavior**, never its
+**presence**.
+
+Phase F adds the presence lever: one plain file per scope, keyed by chart.
+
+```yaml
+# sigs/<team>/defaults/mces/exclusions.yaml
+exclusions:
+  dhcp-api-token:
+    - ocp4-prep-mce-site1-a
+```
+
+**Absent is the normal state.** Most teams will never write either file, and
+several sigs repos carry neither defaults folder at all. Do **not** ship empty
+template files — a repo without one renders byte-for-byte what it rendered
+before this phase. In the mock only `defaults/mces/exclusions.yaml` was
+created; `defaults/hosted-clusters/` has zero chart folders, so a file there
+would have nothing valid to reference and would fail Rule 1.
+
+### F.0 — why the data cannot live per chart
+
+This is the whole reason the file looks the way it does, and the first thing
+anyone will want to change. The obvious design is
+`defaults/<scope>/<chart>/exclusions.yaml`. It cannot work:
+
+- The decision *"does this chart become an Application here?"* is made by the
+  `directories:` generator that `operators/templates/operators.yaml` renders.
+  Chart folder names are **discovered from git at generator time**.
+- That template is Helm, rendered by the repo-server *before* any chart name
+  exists. It sees only values passed down the chain plus `valueFiles` at
+  **statically known paths**. It has no git-listing primitive.
+- `goTemplate` is off repo-wide, so the ApplicationSet `template:` block is
+  flat fasttemplate — no conditionals there either.
+
+So the data has to arrive as a Helm value from **one fixed path per scope**. A
+per-chart file is only readable one layer lower, at `deploy`, where the app has
+already been generated — which leaves an empty wrapper Application per
+exclusion and is completely inert for anything already deployed (`prune: false`
+means the emptied wrapper never prunes its `-deploy` child).
+
+A plain **file** directly under `defaults/<scope>/` is invisible to a
+`directories:` generator (it lists directories only), so it creates no phantom
+app. Both READMEs already documented that plain files there are safe.
+
+Rejected alternatives, for the record: a per-cluster file (auditing *"where is
+chart X not deployed"* must stay one file); `selector: matchExpressions` on
+`path.basename` (nothing models generator selectors, so the CI render would
+show the excluded app as still present); a `disabled: true` stub in the
+cluster's own folder (the folder would also match `<clusterPath>/*` → duplicate
+app name → THE ONE INVARIANT).
+
+### F.1 — platform repo: three templates and the harness
+
+**`operators/templates/operators.yaml`** — a preamble after the `$ocpVersion`
+line builds `$excluded` from `.Values.exclusions`, and **both** defaults
+generators gain a `{{- range $chart := $excluded }}` emitting
+`- path: "defaults/<scope>/<chart>"` / `exclude: true`. Do **not** touch
+`spec.template`.
+
+Three constraints on those entries, verified against Argo's `filterApps`:
+
+1. They must sit in the **same `git:` generator block** as the include glob —
+   set arithmetic is per-generator. In the sibling `<clusterPath>/*` generator
+   they are a silent no-op.
+2. They must match the include glob's output **byte-for-byte**.
+   `defaults/mces/*` yields `defaults/mces/dhcp-api-token`; a deeper path
+   removes nothing, silently.
+3. Because the two defaults generators are an `if/else` pair, an MCE never
+   evaluates hosted-cluster exclusions and vice versa. No cross-scope leakage.
+
+Two mechanical notes: `{{ "{{" }}` escaping is **not** needed here — this is in
+`generators:`, not `spec.template`, so it never reaches fasttemplate. And Go
+sorts map keys, so `$excluded` is deterministic and the CR spec stays
+byte-stable.
+
+Malformed input **fails the render on purpose** — a freeze deletes nothing
+(ARCHITECTURE §6-2), and silently ignoring it would deploy a chart where
+someone asked it not to. A *well-formed* file naming a chart or cluster that
+does not exist is inert and silent; that is the lint's job, below.
+
+**`clusters/templates/clustersAppset.yaml`** — prepend
+`'$values/defaults/hosted-clusters/exclusions.yaml'` to `valueFiles`
+**first, before the `$day1` entry**, so day1 outranks a stray `mastertag`; and
+append a third source `ref: values` after `ref: day1` (`sources[0]` must stay
+the platform source).
+
+**`clusters/templates/inClusterApp.yaml`** — add `valueFiles` with
+`'$values/defaults/mces/exclusions.yaml'` above the inline `values: |`
+(`ignoreMissingValueFiles: true` is already there), plus a second source
+`ref: values`. **This app gains its first `$values` reference** — make it the
+live checkpoint after the platform push. Inline values are applied after
+valueFiles, so `mastertag` is safe.
+
+**`tools/render-verify/render_chain.py`** — `lint_exclusions()`, called from
+`take_snapshot` immediately after `lint_sigs_tree()` and **before** the render
+`try:` (a malformed file makes `helm_template` raise, which collapses into one
+`render aborted:` line, so the precise message must already be in
+`CHECK_FAILURES`). Four rules, per scope, skipped silently if the file is
+absent:
+
+- **Rule 0 — schema.** `exclusions` is the **only** top-level key (every other
+  key lands as a value on the operators chart — a stray `mastertag` would be a
+  version, not a comment); its value is a map; each entry is a list of strings
+  or null.
+- **Rule 1 — chart names.** Every key must be a directory in that same
+  `defaults/<scope>/`. A new fleet chart WITH exclusions means the chart folder
+  and its entry land in the **same commit** — chart-first deploys it to the
+  excluded cluster for one sync interval, entry-first fails this rule.
+- **Rule 2 — target names.** Every listed name must be a real folder basename:
+  MCEs = `sites/*/*/mces/*`; hosted clusters = `<mce>/*` minus `in-cluster`.
+- **Rule 3 — no hub.** `defaults/hub/exclusions.yaml` must not exist. Nothing
+  reads it: the hub flow is `mces/inClusterAppset` → `deploy` and never passes
+  through the operators chart.
+
+Both name rules are needed, because the two typos fail differently and **both
+are silent**:
+
+| typo | what renders | caught by |
+|---|---|---|
+| `dhcp-api-tokn: [ocp4-prep-mce-site1-a]` | `- path: "defaults/mces/dhcp-api-tokn"` `exclude: true` → matches no folder → **chart still deploys** | Rule 1 |
+| `dhcp-api-token: [ocp4-prep-mce-site1-x]` | `has` is false for every MCE → **no exclude entry emitted anywhere** | Rule 2 |
+
+The same commit adds a **third resolved-file bucket** so `compare` stays
+readable. The exclusions file is an input to *generation*, not to a workload's
+values; hashing it into the load-bearing sigs sequence would raise a HARD diff
+on **every** app in the team for a change whose real effect is one line of
+`APPS DISAPPEARED`. Concretely: `CONTROL_FILES` beside `SIGS_MARKER`; in
+`resolve_value_files`, after `rel = posixpath.normpath(rel)`, re-tag
+`repo = "control"`; in `compare`, report the control bucket as INFO next to the
+day1 block; module docstring updated to three buckets — sigs (HARD), day1
+(INFO), control (INFO).
+
+### F.2 — push order (two repos, platform FIRST)
+
+The platform change is **inert on its own**: with no `exclusions.yaml` anywhere,
+`$excluded` is empty and every generator chomps to exactly its pre-change YAML.
+The sigs data is what activates it. So:
+
+1. **Platform repo MR** (F.1). Merge and push.
+2. **Confirm on one MCE** that `<team>-in-cluster` and one `<team>-<hc>` reach
+   Synced/Healthy. That is the missing-`$values`-file path proving itself —
+   `inClusterApp` has never carried a `$values` reference before, and this is
+   the only step that exercises it live.
+3. **Only then**, the sigs repo commit creating `defaults/mces/exclusions.yaml`.
+
+Reversed, the sigs file lands with no template that reads it: harmless but
+unverified, and the first thing that *does* read it is the merge that matters.
+
+### F.3 — expected compare output
+
+Platform commit alone, against the pre-change baseline:
+
+```
+apps: 35 -> 35
+IDENTITY OK        # zero HARD
+```
+
+INFO on **exactly six apps** — the 4 hosted-cluster apps and the 2 static
+`<team>-in-cluster` apps — each reporting `ref sources added` and `valueFiles
+list changed`. A seventh app, any HARD line, or any `apps added` is a **stop**.
+
+Then the sigs data commit, against the platform snapshot:
+
+```
+apps: 35 -> 33
+  [info] ...:redbull-in-cluster: exclusion control file [] -> [('defaults/mces/exclusions.yaml', '<hash>')]
+  ... (one per MCE)
+HARD FAILURES:
+  [FAIL] APPS DISAPPEARED: ['ocp4-prep-mce-site1-a:redbull-in-cluster-dhcp-api-token',
+                            'ocp4-prep-mce-site1-a:redbull-in-cluster-dhcp-api-token-deploy']
+```
+
+**That exit-1 is the pass condition, not a failure.** Two entries per
+exclusion — the wrapper *and* its `-deploy` leaf, because the simulator renders
+the whole chain. Exactly two `[info] exclusion control file` lines, one per
+MCE's `in-cluster` app; the hosted-cluster apps resolve nothing, since
+`defaults/hosted-clusters/exclusions.yaml` stays absent. No `valueFiles list
+changed` lines this time — those paths changed in the platform commit; only
+resolution changes now. Anything else in the disappeared list, or any
+`resolved sigs value-file content sequence changed`, is a **stop**.
+
+### F.4 — scope caveat: this uninstalls nothing
+
+None of this tears down a running workload. The repo has no
+`resources-finalizer` on any Application and every platform appset is
+`prune: false` (ARCHITECTURE §6-2). Excluding a chart deletes the wrapper
+Application; its `-deploy` child and the workload are **orphaned in place,
+still running**. Exclusion is prevention. Teardown is a deliberate manual step
+(`argocd app delete <team>-<cluster>-<chart>-deploy --cascade`, and only
+**after** the exclusion has reconciled — otherwise the wrapper's `selfHeal`
+recreates it within a minute). This is the safety model working, not a gap.
+Full procedure, including the undo and the full-override escape hatch:
+**runbook R10** in `ARCHITECTURE.md`.
+
+### F.5 — docs
+
+`defaults/hosted-clusters/README.md` **rule 4 said the opposite of this feature
+and was rewritten**: values differences → `values-<cluster>.yaml`; must not
+exist there at all → `exclusions.yaml`. **Rule 1 (XOR) gained a carve-out** —
+`defaults/` + a cluster folder is now legal *iff* that pair is listed in
+`exclusions.yaml`, the deliberate full-override escape hatch (different
+`repourl` / `targetRevision`); without the entry it is still a duplicate-app
+failure, so the accidental case is unaffected. Rule 3 names `exclusions.yaml` as
+a safe plain file, and a new `## Structural opt-out` section carries the format
+and the four rules. `defaults/mces/README.md` mirrors it with MCE names.
+`defaults/hub/README.md` gains one rule: no exclusions here, single cluster,
+Rule 3 fails if you create the file. `ARCHITECTURE.md` gains §2.2, the control
+bucket and the exclusion lints in §6-5, the XOR carve-out in §6-4 and the
+invariants checklist, and runbook **R10**.
+
+---
+
 ## Failure modes & controls
 
 | Mistake | Consequence | Control |
@@ -1881,6 +2100,11 @@ checklist), the team-repo root README, and `defaults/mces/README.md`. Copy the u
 | Human cascade-deletes an app while the tree is churning | that app's workloads torn down — the one deletion path the no-finalizer model does not cover | optional delete guard rail (`tools/migration-guardrail/`), on before C and off after E |
 | "Fixing" the frozen `namespace:` line while in there | fleet-wide app identity change → delete/recreate | explicitly frozen |
 | `targetRevision` in a `defaults/*` config | silently overrides every stream pin for that chart | README rule: defaults configs carry repourl/namespace/syncPolicy; pins live in `operators/` |
+| **(F)** `exclusions.yaml` names a chart that does not exist | the exclude matches no folder; the include glob still emits the chart, so it **deploys to the cluster that opted out** — completely silent | Rule 1 in `lint_exclusions()`; ship a new fleet chart and its exclusion entry in the SAME commit |
+| **(F)** `exclusions.yaml` names a cluster that does not exist | `has` is false everywhere, so **no exclude entry is emitted at all** and the chart stays fleet-wide — completely silent | Rule 2 in `lint_exclusions()` |
+| **(F)** a stray top-level key in `exclusions.yaml` | the file is merged into the operators chart's values, so it becomes a real chart value (a stray `mastertag` is an OCP version) | Rule 0: `exclusions` must be the only top-level key |
+| **(F)** exclude entry written at the wrong depth, or in the sibling `<clusterPath>/*` generator | removes nothing — Argo computes include && !exclude per generator, over the same path strings | both constraints are in the template comment; `compare` shows the app still present |
+| **(F)** expecting an exclusion to uninstall the workload | wrapper app deleted, `-deploy` child and workload orphaned in place, still running | by design (§6-2). R10 step 4 is the deliberate cascade delete, and only after the exclusion reconciles |
 
 ---
 

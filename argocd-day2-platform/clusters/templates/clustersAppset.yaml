@@ -51,6 +51,9 @@ spec:
             # reads them, and the inline values below outrank them anyway
             # (Argo applies helm.values after valueFiles).
             valueFiles:
+              # Generation input, not workload config: the team's fleet-default
+              # opt-out matrix. FIRST on purpose — day1 must outrank it.
+              - '$values/defaults/hosted-clusters/exclusions.yaml'
               - '$day1/sites/{{ .Values.site }}/mces/{{ .Values.mce }}/hostedClusters/{{ "{{" }}path.basename{{ "}}" }}.yaml'
             values: |
               group: '{{ .Values.group }}'
@@ -63,6 +66,9 @@ spec:
         - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day1/platform-config.git'
           targetRevision: main
           ref: day1
+        - repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+          targetRevision: main
+          ref: values
       destination:
         name: in-cluster
         namespace: gitops-{{ .Values.group }}

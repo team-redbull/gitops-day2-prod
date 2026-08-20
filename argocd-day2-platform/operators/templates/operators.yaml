@@ -10,6 +10,37 @@
      tag, or a pinned chart silently falls back to the team default. */ -}}
 {{- $mastertag := required "mastertag missing: no day1 platform-config entry for this destination" .Values.mastertag | toString -}}
 {{- $ocpVersion := $mastertag | splitList "-" | first -}}
+{{- /* Fleet-default exclusions — the one structural opt-out from
+     defaults/mces/ and defaults/hosted-clusters/.
+     The data CANNOT live per-chart: chart folders are discovered from git at
+     generator time, and this template only ever sees Helm VALUES. So it
+     arrives from ONE fixed-path file per scope, defaults/<scope>/
+     exclusions.yaml, resolved by the parent Application (clustersAppset /
+     inClusterApp) through its $values ref source. Absent file -> empty dict
+     -> zero exclude entries -> byte-identical output to before this feature,
+     which is the permanent state of any team that never writes one.
+     A key naming a chart that does not exist, or a name that is not a real
+     cluster, is INERT and silent here — that is what render_chain.py's
+     lint_exclusions() exists to catch, in CI. */ -}}
+{{- $exclusions := .Values.exclusions | default dict -}}
+{{- if not (kindIs "map" $exclusions) -}}
+{{-   fail (printf "defaults/<scope>/exclusions.yaml: `exclusions` must be a map of <chart> -> [names], got %s" (kindOf $exclusions)) -}}
+{{- end -}}
+{{- $isMce := eq .Values.cluster "in-cluster" -}}
+{{- /* MCE hubs key on the MCE name (.Values.cluster is the literal
+     "in-cluster" for every one of them); hosted clusters on the folder name. */ -}}
+{{- $exKey := $isMce | ternary .Values.mce .Values.cluster -}}
+{{- $excluded := list -}}
+{{- range $chart, $names := $exclusions -}}
+{{-   if $names -}}
+{{-     if not (kindIs "slice" $names) -}}
+{{-       fail (printf "exclusions.%s must be a list of names, got %s" $chart (kindOf $names)) -}}
+{{-     end -}}
+{{-     if has $exKey $names -}}
+{{-       $excluded = append $excluded $chart -}}
+{{-     end -}}
+{{-   end -}}
+{{- end -}}
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
@@ -26,8 +57,17 @@ spec:
     - git:
         repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
         revision: main
+        # `exclude:` entries MUST sit in THIS generator's directories list and
+        # must match the include glob's output byte-for-byte. The controller
+        # computes include && !exclude PER GENERATOR, over the same path
+        # strings: an exclude in the sibling <clusterPath>/* generator is a
+        # no-op, and a deeper path removes nothing.
         directories:
           - path: "defaults/mces/*"
+          {{- range $chart := $excluded }}
+          - path: "defaults/mces/{{ $chart }}"
+            exclude: true
+          {{- end }}
     {{- else if not .Values.hub }}
     # Fleet defaults for hosted clusters: every chart folder here is deployed
     # to every hosted cluster of the team (mirror of the defaults/mces
@@ -35,8 +75,14 @@ spec:
     - git:
         repoURL: 'https://8200gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
         revision: main
+        # Same two constraints as the MCE generator above: same block, and
+        # byte-for-byte equal to what the include glob emits.
         directories:
           - path: "defaults/hosted-clusters/*"
+          {{- range $chart := $excluded }}
+          - path: "defaults/hosted-clusters/{{ $chart }}"
+            exclude: true
+          {{- end }}
     {{- end }}
   template:
     metadata:

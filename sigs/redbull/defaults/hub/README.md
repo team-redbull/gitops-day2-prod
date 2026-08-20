@@ -46,6 +46,14 @@ defaults/
    (`.Values.repourl`). Several older configs in this repo write `repoUrl`;
    that spelling reaches the template as nil and renders an empty `repoURL`.
    Copy the `example-chart` config, not the older configs.
+6. **No `exclusions.yaml` here.** The structural opt-out that
+   [`defaults/mces/`](../mces/#structural-opt-out) and
+   [`defaults/hosted-clusters/`](../hosted-clusters/#structural-opt-out) have
+   is meaningless for a single cluster, and nothing would read the file: the
+   hub flow is `mces/inClusterAppset` → `deploy` and never passes through the
+   operators chart, which is the only template that consumes an exclusion
+   matrix. To stop deploying a hub chart, delete its folder.
+   `render_chain.py` fails (Rule 3) if the file exists.
 
 ## Values precedence (lowest to highest)
 
