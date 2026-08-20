@@ -71,6 +71,7 @@ Three orientation examples:
 |---|---|---|
 | deploy a chart to one cluster | adds a folder with 2 files under that cluster in `sigs/<team>` | the `operators` generator finds the folder and renders a leaf app |
 | deploy a chart to every hosted cluster | adds a folder under `sigs/<team>/defaults/hosted-clusters/` | a second `operators` generator fans it out — same template, byte-identical app |
+| ...except on two of them | names them under that chart in `defaults/hosted-clusters/exclusions.yaml` | the same generator gains `exclude:` entries for those paths (§6.7) |
 | upgrade a cluster to OCP 4.20.9 | edits one line in the **day1** repo | the chain re-renders `ocpVersion`, and every version-keyed value path with it |
 
 ---
@@ -135,7 +136,7 @@ Each row renders the chart in the next row.
 | 4 | `mces/templates/inClusterAppset.yaml` | prod-hub | dirs `defaults/hub/*` | App `<team>-in-cluster-<chart>` | the `deploy` chart in **hub mode** |
 | 5 | `clusters/templates/clustersAppset.yaml` | the MCE | dirs `<mcePath>/*` minus `<mcePath>/in-cluster` | App `<team>-<cluster>` | the `operators` chart |
 | 6 | `clusters/templates/inClusterApp.yaml` | the MCE | **none** — always rendered | App `<team>-in-cluster` | the `operators` chart, `cluster: in-cluster` |
-| 7 | `operators/templates/operators.yaml` | the MCE | dirs ×2: `<clusterPath>/*` **+** `defaults/mces/*` (MCE hub) or `defaults/hosted-clusters/*` (hosted) | App `<team>-<cluster>-<chart>` | the `deploy` chart |
+| 7 | `operators/templates/operators.yaml` | the MCE | dirs ×2: `<clusterPath>/*` **+** `defaults/mces/*` (MCE hub) or `defaults/hosted-clusters/*` (hosted), the defaults one carrying `exclude:` entries from `exclusions.yaml` | App `<team>-<cluster>-<chart>` | the `deploy` chart |
 | 8 | `deploy/templates/deployApp.yaml` | the MCE (or prod-hub, in hub mode) | — | App `<team>-<cluster>-<chart>-deploy` — **the workload** | `helm-charts/<chart>` |
 
 ```
@@ -224,7 +225,14 @@ mastertag: 4.16.27-x86_64
 
 Notice what did the work: **a folder made a cluster count as a cluster, a
 folder made a chart exist there, and the day1 repo said which OCP version to
-build the value paths from.** No registries, no exclude lists.
+build the value paths from.** No registries — a folder's existence is the
+whole opt-in.
+
+There is exactly **one** opt-*out*, and it is deliberately the only list of
+names in the system: `defaults/<scope>/exclusions.yaml`, which lets a fleet
+default skip named clusters (§6.7). It is a list because it has to be — the
+alternative would be a per-chart file, and nothing in the chain can read one
+early enough to stop an app being generated.
 
 ---
 
@@ -429,6 +437,7 @@ version-less and outside the `sites/` tree.
 
 ```yaml
 valueFiles:
+  - '$values/defaults/hosted-clusters/exclusions.yaml'                     # -> exclusions
   - '$day1/sites/<site>/mces/<mce>/hostedClusters/{{path.basename}}.yaml'  # -> mastertag
 values: |
   group:       <team>
@@ -462,6 +471,12 @@ and the inline `values:` block outranks them anyway, because **Argo applies
 It is **statically rendered for every MCE** rather than folder-discovered.
 That is deliberate: fleet defaults from `defaults/mces/` must reach every MCE
 hub *even when that MCE has no `in-cluster/` folder of its own*.
+
+It also carries the only `valueFiles` entry on this app —
+`'$values/defaults/mces/exclusions.yaml'`, above the inline `values:` block —
+and a second source `ref: values` to resolve it. That is this app's **first
+and only** `$values` reference; the inline block is applied after `valueFiles`,
+so `mastertag` cannot be shadowed from there. See §6.7.
 
 This is one of only two places a version is derived:
 
@@ -514,6 +529,28 @@ the version.
 | always | `<clusterPath>/*` | the destination's own chart folders |
 | `cluster == in-cluster` | `defaults/mces/*` | the fleet layer for every MCE hub |
 | otherwise | `defaults/hosted-clusters/*` | the fleet layer for every hosted cluster |
+
+**The structural opt-out.** Each defaults generator also emits, from
+`.Values.exclusions` (resolved by the parent app from
+`defaults/<scope>/exclusions.yaml`), one `- path: "defaults/<scope>/<chart>"` /
+`exclude: true` per chart that names this destination. Three constraints,
+which are why the template looks the way it does:
+
+1. the entries sit in the **same `git:` block** as the include glob — Argo
+   computes `include && !exclude` per generator, so an exclude in the sibling
+   `<clusterPath>/*` generator is a silent no-op;
+2. they match the include glob's output **byte-for-byte** — a deeper path
+   removes nothing, silently;
+3. the two defaults generators are an `if/else` pair, so scopes cannot leak
+   into each other.
+
+The data cannot live per chart: chart folder names are discovered from git at
+**generator** time, while this template is Helm rendered before any chart name
+exists — it sees only values at statically known paths. Malformed input
+`fail`s the render on purpose; a well-formed file naming something that does
+not exist is inert and silent, which is what `render_chain.py`'s four
+exclusion rules catch in CI. Full rationale: `ARCHITECTURE.md` §2.2; procedure:
+runbook R10.
 
 Because both generators feed **the same ApplicationSet and the same
 template**, and the template only ever uses `path.basename`, a chart renders a
@@ -905,10 +942,16 @@ python3 tools/render-verify/render_chain.py snapshot --out /tmp/after
 python3 tools/render-verify/render_chain.py compare /tmp/before /tmp/after
 ```
 
-`snapshot` needs a checkout of the **day1** repo — every destination's version
-is read from it. It defaults to `../gitops-day1/platform-config` next to this
-repo; override with `--day1 ROOT`. Without one it refuses to run rather than
-guess.
+`snapshot` needs all three checkouts — the sigs tree, the platform charts and
+the **day1** repo, which every destination's version is read from. Pass
+`--group NAME`, `--sigs ROOT`, `--platform ROOT` and `--day1 ROOT` when they
+are separate GitLab projects, as they are in the air-gapped env; the defaults
+describe a single mock checkout. A missing one exits 2 naming the flag to
+pass, rather than guessing.
+
+**`snapshot` exits 1 on any check failure**, so a CI lint job is `snapshot`
+with the output discarded — reference GitLab CI fragments for both repo roles
+ship at `tools/ci/`.
 
 `compare` splits every app's resolved value files by repo, because the two
 have opposite expectations:
@@ -916,15 +959,22 @@ have opposite expectations:
 - the **sigs** sequence is **HARD** — a change there changes what a workload
   renders;
 - the **day1** sequence is **INFO** — that is precisely where versions are
-  supposed to change.
+  supposed to change;
+- the **control** sequence is **INFO** — the `exclusions.yaml` matrices (§6.7),
+  which decide whether an app *exists* rather than what it renders. Their real
+  effect lands as `APPS DISAPPEARED` on the few apps actually excluded;
+  hashing them into the sigs sequence would raise a HARD diff on every app in
+  the team for that same two-line change.
 
 Identity (name, destination, `releaseName`, `syncPolicy`, repo/branch) stays
 HARD, as do disappearing apps.
 
 It also lints: `env ∈ {prod,prep,test}`, duplicate app names, leftover
 `{{...}}` placeholders, the frozen namespace line, depth-ambiguous `files:`
-globs, and **day1 parity** — every MCE and hosted-cluster folder must have a
-day1 file carrying a `mastertag` matching `<major>.<minor>.<patch>[-<arch>]`.
+globs, the four **exclusion rules** (§6.7 — schema, chart names, cluster
+names, no hub file), and **day1 parity** — every MCE and hosted-cluster folder
+must have a day1 file carrying a `mastertag` matching
+`<major>.<minor>.<patch>[-<arch>]`.
 
 Structural changes must end **`IDENTITY OK`**; deliberate changes (pins,
 values) must show **only** the diffs you intended, on the apps you intended.

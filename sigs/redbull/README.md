@@ -35,7 +35,9 @@ sigs/redbull/
 └── defaults/                           # deploy-once-to-a-whole-fleet layers
     ├── hub/                            # → the prod-hub mgmt cluster (see its README)
     ├── mces/                           # → every MCE hub          (see its README)
+    │   └── exclusions.yaml             # optional: the ONE structural opt-out
     └── hosted-clusters/                # → every hosted cluster   (see its README)
+        └── exclusions.yaml             # optional: same, keyed by chart
 ```
 
 ## Naming rules
@@ -145,6 +147,32 @@ nothing to create, nothing changes for them on cluster upgrades.
 ⚠️ A `targetRevision` in a `defaults/*/<chart>/<chart>.yaml` file sits ABOVE
 the version-pin layer and silently overrides it. Keep `targetRevision` out of
 defaults configs for any chart that should follow version pins.
+
+## Opting one cluster out of a fleet default
+
+A chart folder in `defaults/mces/` reaches **every** MCE hub, and one in
+`defaults/hosted-clusters/` **every** hosted cluster. To carve out exceptions,
+name them per chart in that folder's `exclusions.yaml`:
+
+```yaml
+# defaults/mces/exclusions.yaml
+exclusions:
+  dhcp-api-token:
+    - ocp4-prep-mce-site1-a
+```
+
+Absent is the normal state. Keys are chart folders in that same directory,
+values are MCE names (or hosted-cluster names, in the other scope) — a typo on
+**either** axis is silent at runtime and the chart just keeps deploying, so
+the pre-merge check is the only thing that catches it. There is no
+`defaults/hub/exclusions.yaml`.
+
+Need different *values* rather than absence? Use `values-<mce>.yaml` /
+`values-<cluster>.yaml` instead — an exclusion is the heavier tool, and it
+does **not** uninstall anything already running.
+
+Details: each defaults folder's README (`## Structural opt-out`). Procedure,
+teardown and undo: `ARCHITECTURE.md` runbook R10.
 
 ## Hard rules
 
