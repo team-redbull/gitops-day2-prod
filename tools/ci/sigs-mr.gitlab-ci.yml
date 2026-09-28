@@ -1,0 +1,58 @@
+# Reference pipeline for a SIGS repo MR
+#   redbull/gitops-day2-prod/sigs/<team>.git
+#
+# The team's own tree is the MR; the platform charts and the day1 versions are
+# cloned at main, because that is what the change will actually render against
+# once it merges.
+#
+# See tools/ci/README.md for the two preconditions (helm on the runner,
+# cross-project read tokens) and for why `review` is allow_failure.
+
+.day2_render:
+  # Needs: helm, python3, PyYAML, git.
+  image: $DAY2_RENDER_IMAGE
+  variables:
+    GIT_STRATEGY: clone
+    # $CI_PROJECT_NAME IS the team name — the scmProvider generator in the
+    # groups appset names teams by repo, so the two are the same string by
+    # construction. Do not hardcode a team here.
+    GROUP: $CI_PROJECT_NAME
+    PLATFORM_URL: https://$GITLAB_HOST/redbull/gitops-day2-prod/argocd-day2-platform.git
+    DAY1_URL: https://$GITLAB_HOST/redbull/gitops-day1/platform-config.git
+  before_script:
+    - git clone --depth 1 -b main "$PLATFORM_URL" /tmp/platform
+    - git clone --depth 1 -b main "$DAY1_URL" /tmp/day1
+    - RENDER=/tmp/platform/tools/render-verify/render_chain.py
+
+# BLOCKING. Every consistency rule, on the MR branch. `snapshot` exits 1 on any
+# failure, so no extra subcommand is needed for a lint-only job — the output
+# directory is simply discarded.
+lint:
+  extends: .day2_render
+  stage: test
+  script:
+    - python3 "$RENDER" snapshot --out /tmp/mr
+        --group "$GROUP"
+        --sigs "$CI_PROJECT_DIR"
+        --platform /tmp/platform
+        --day1 /tmp/day1
+
+# INFORMATIONAL. Renders the target branch too and diffs. A deliberate
+# exclusion or decommission IS an `APPS DISAPPEARED`, so this is a diff for a
+# human to approve, not a gate — see tools/ci/README.md.
+review:
+  extends: .day2_render
+  stage: test
+  allow_failure: true
+  script:
+    - python3 "$RENDER" snapshot --out /tmp/mr
+        --group "$GROUP" --sigs "$CI_PROJECT_DIR"
+        --platform /tmp/platform --day1 /tmp/day1 || true
+    - git -C "$CI_PROJECT_DIR" fetch origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+    - git -C "$CI_PROJECT_DIR" worktree add /tmp/target FETCH_HEAD
+    - python3 "$RENDER" snapshot --out /tmp/base
+        --group "$GROUP" --sigs /tmp/target
+        --platform /tmp/platform --day1 /tmp/day1 || true
+    - python3 "$RENDER" compare /tmp/base /tmp/mr
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"

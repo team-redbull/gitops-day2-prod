@@ -1,0 +1,39 @@
+{{- /* Plants AppProject <group> into the namespace instance B (the UPI Argo,
+     openshift-gitops-upi) reconciles, because every app upiAppset hands over
+     to B references `project: <group>`. The prod-hub counterpart is
+     appProjectAppset (clusters: {} over instance A's cluster secrets), which
+     cannot reach B: B is not a cluster secret on A, it is another Argo on the
+     same cluster. Same external chart, same single value, so the team's policy
+     is one definition on both instances.
+
+     Rendered for EVERY team, unconditionally: Helm cannot see whether a team
+     has UPI folders. A team without any gets one inert AppProject in B.
+     The namespace string is also in upiAppset.yaml. */ -}}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ .Values.group }}-upi-app-project
+  namespace: gitops-{{ .Values.group }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    # team only: this is plumbing, not an app for a UPI cluster, so it stays
+    # out of `day2.gitops/role=upi` selectors (like the app-projects apps).
+    day2.gitops/team: '{{ .Values.group }}'
+spec:
+  project: default
+  source:
+    repoURL: 'https://gitlab[REDACTED]/redbull/helm-charts/argo-appproject.git'
+    path: .
+    targetRevision: main
+    helm:
+      ignoreMissingValueFiles: true
+      values: |
+        group: '{{ .Values.group }}'
+  destination:
+    name: in-cluster
+    namespace: openshift-gitops-upi
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false

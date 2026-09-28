@@ -1,0 +1,198 @@
+{{- /* The destination's OCP version arrives as .Values.mastertag:
+       hosted clusters  -> from this Application's own $day1 value file
+                           (sites/<site>/mces/<mce>/hostedClusters/<cluster>.yaml)
+       the MCE itself   -> passed inline by inClusterApp, from the MCE's day1
+                           version.yaml (day2-owned; day1 never reads it)
+       UPI clusters     -> OPTIONAL, from this Application's own $values file
+                           sites/<site>/<env>/upi/<cluster>/version.yaml
+                           (upiAppset; day1 does not know UPI clusters)
+     One derivation either way: strip the arch at the first '-' and use the
+     rest verbatim (4.16.27-x86_64 -> 4.16.27). Version-pin layers are keyed
+     by that exact version, so EVERY upgrade — z-streams included — needs its
+     operators/<chart>/ocp-versions/<v>/ folder created BEFORE day1 flips the
+     tag, or a pinned chart silently falls back to the team default.
+     Only a UPI cluster may lack a tag: it is then version-less like prod-hub,
+     $ocpVersion is "" and every version-dependent line below is skipped.
+     Every other destination still REQUIRES one. */ -}}
+{{- $mastertag := "" -}}
+{{- if or (not .Values.upi) .Values.mastertag -}}
+{{-   $mastertag = required "mastertag missing: no day1 platform-config entry for this destination" .Values.mastertag | toString -}}
+{{- end -}}
+{{- $ocpVersion := $mastertag | splitList "-" | first -}}
+{{- /* The namespace this ApplicationSet and every app below it live in, i.e.
+     which Argo instance reconciles them. Default: the team namespace on the
+     Argo that rendered this chart (an MCE's, for MCE hubs and hosted
+     clusters). UPI: upiAppset passes openshift-gitops-upi, the namespace the
+     UPI Argo instance reconciles on the hub cluster. */ -}}
+{{- $argoNs := .Values.argoNamespace | default (printf "gitops-%s" .Values.group) -}}
+{{- /* Fleet-default exclusions — the one structural opt-out from
+     defaults/mces/, defaults/hosted-clusters/ and defaults/upi/.
+     The data CANNOT live per-chart: chart folders are discovered from git at
+     generator time, and this template only ever sees Helm VALUES. So it
+     arrives from ONE fixed-path file per scope, defaults/<scope>/
+     exclusions.yaml, resolved by the parent Application (clustersAppset /
+     inClusterApp / upiAppset) through its $values ref source. Absent file -> empty dict
+     -> zero exclude entries -> byte-identical output to before this feature,
+     which is the permanent state of any team that never writes one.
+     A key naming a chart that does not exist, or a name that is not a real
+     cluster, is INERT and silent here — that is what render_chain.py's
+     lint_exclusions() exists to catch, in CI. */ -}}
+{{- $exclusions := .Values.exclusions | default dict -}}
+{{- if not (kindIs "map" $exclusions) -}}
+{{-   fail (printf "defaults/<scope>/exclusions.yaml: `exclusions` must be a map of <chart> -> [names], got %s" (kindOf $exclusions)) -}}
+{{- end -}}
+{{- $isMce := eq .Values.cluster "in-cluster" -}}
+{{- /* Three destination kinds, one template. if/else, NOT a ternary:
+     .Values.upi is nil on every MCE and hosted-cluster render, and sprig's
+     ternary requires a real bool — a nil there aborts the render. */ -}}
+{{- $role := "hosted-cluster" -}}
+{{- if $isMce -}}
+{{-   $role = "mce" -}}
+{{- else if .Values.upi -}}
+{{-   $role = "upi" -}}
+{{- end -}}
+{{- /* MCE hubs key on the MCE name (.Values.cluster is the literal
+     "in-cluster" for every one of them); hosted clusters and UPI clusters on
+     the folder name. */ -}}
+{{- $exKey := $isMce | ternary .Values.mce .Values.cluster -}}
+{{- $excluded := list -}}
+{{- range $chart, $names := $exclusions -}}
+{{-   if $names -}}
+{{-     if not (kindIs "slice" $names) -}}
+{{-       fail (printf "exclusions.%s must be a list of names, got %s" $chart (kindOf $names)) -}}
+{{-     end -}}
+{{-     if has $exKey $names -}}
+{{-       $excluded = append $excluded $chart -}}
+{{-     end -}}
+{{-   end -}}
+{{- end -}}
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: {{ .Values.group }}-{{ .Values.cluster }}-operators
+  namespace: {{ $argoNs }}
+spec:
+  generators:
+    - git:
+        repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+        revision: main
+        directories:
+          - path: "{{ .Values.clusterPath }}/*"
+    {{- if eq .Values.cluster "in-cluster" }}
+    - git:
+        repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+        revision: main
+        # `exclude:` entries MUST sit in THIS generator's directories list and
+        # must match the include glob's output byte-for-byte. The controller
+        # computes include && !exclude PER GENERATOR, over the same path
+        # strings: an exclude in the sibling <clusterPath>/* generator is a
+        # no-op, and a deeper path removes nothing.
+        directories:
+          - path: "defaults/mces/*"
+          {{- range $chart := $excluded }}
+          - path: "defaults/mces/{{ $chart }}"
+            exclude: true
+          {{- end }}
+    {{- else if .Values.upi }}
+    # Fleet defaults for UPI clusters: every chart folder here is deployed to
+    # every UPI cluster of the team. Checked BEFORE the hosted-cluster branch
+    # below, which would otherwise catch every non-MCE destination.
+    - git:
+        repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+        revision: main
+        # Same two constraints as the MCE generator above: same block, and
+        # byte-for-byte equal to what the include glob emits.
+        directories:
+          - path: "defaults/upi/*"
+          {{- range $chart := $excluded }}
+          - path: "defaults/upi/{{ $chart }}"
+            exclude: true
+          {{- end }}
+    {{- else if not .Values.hub }}
+    # Fleet defaults for hosted clusters: every chart folder here is deployed
+    # to every hosted cluster of the team (mirror of the defaults/mces
+    # generator above).
+    - git:
+        repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+        revision: main
+        # Same two constraints as the MCE generator above: same block, and
+        # byte-for-byte equal to what the include glob emits.
+        directories:
+          - path: "defaults/hosted-clusters/*"
+          {{- range $chart := $excluded }}
+          - path: "defaults/hosted-clusters/{{ $chart }}"
+            exclude: true
+          {{- end }}
+    {{- end }}
+  template:
+    metadata:
+      name: '{{ .Values.group }}-{{ .Values.cluster }}-{{ "{{" }}path.basename{{ "}}" }}'
+      labels:
+        day2.gitops/team: '{{ .Values.group }}'
+        day2.gitops/env: '{{ .Values.env }}'
+        day2.gitops/site: '{{ .Values.site }}'
+        {{- if .Values.mce }}
+        day2.gitops/mce: '{{ .Values.mce }}'
+        {{- end }}
+        day2.gitops/cluster: '{{ .Values.cluster }}'
+        day2.gitops/chart: '{{ "{{" }}path.basename{{ "}}" }}'
+        {{- if $ocpVersion }}
+        day2.gitops/ocp-version: '{{ $ocpVersion }}'
+        {{- end }}
+        day2.gitops/role: {{ $role }}
+    spec:
+      project: '{{ .Values.group }}'
+      sources:
+        - repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/argocd-day2-platform.git'
+          targetRevision: main
+          path: deploy
+          helm:
+            ignoreMissingValueFiles: true
+            values: |
+              group: '{{ .Values.group }}'
+              {{- if .Values.mce }}
+              mce: {{ .Values.mce }}
+              mcePath: {{ .Values.mcePath }}
+              {{- end }}
+              cluster: {{ .Values.cluster }}
+              clusterPath: {{ .Values.clusterPath }}
+              env: {{ .Values.env }}
+              site: {{ .Values.site }}
+              {{- if $ocpVersion }}
+              ocpVersion: '{{ $ocpVersion }}'
+              {{- end }}
+              operator: {{ "{{" }}path.basename{{ "}}" }}
+              {{- if .Values.upi }}
+              upi: true
+              upiPath: {{ .Values.upiPath }}
+              argoNamespace: {{ $argoNs }}
+              {{- end }}
+            # Deploy-config stack, lowest -> highest: team default, per-OCP-version
+            # pin (selected by the destination's own version, from day1), fleet
+            # defaults, the cluster's own folder. All optional
+            # (ignoreMissingValueFiles).
+            valueFiles:
+              - '$values/operators/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+              {{- if $ocpVersion }}
+              - '$values/operators/{{ "{{" }}path.basename{{ "}}" }}/ocp-versions/{{ $ocpVersion }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+              {{- end }}
+              {{- if eq .Values.cluster "in-cluster" }}
+              - '$values/defaults/mces/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+              {{- else if .Values.upi }}
+              - '$values/defaults/upi/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+              {{- else }}
+              - '$values/defaults/hosted-clusters/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+              {{- end }}
+              - '$values/{{ .Values.clusterPath }}/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+        - ref: values
+          repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+          targetRevision: main
+      destination:
+        name: in-cluster
+        namespace: {{ $argoNs }}
+      syncPolicy:
+        automated:
+          selfHeal: true
+          prune: false
+        syncOptions:
+          - CreateNamespace=true

@@ -1,0 +1,62 @@
+{{- /* The MCE's OCP version arrives as .Values.mastertag, resolved by this
+     Application's own $day1 value file (see mcesAppset). Strip the arch at
+     the first '-': 4.16.27-x86_64 -> 4.16.27, used verbatim as ocpVersion.
+     `required` fails the render loudly if day1 has no entry — an MCE must
+     never deploy with a silently empty version. */ -}}
+{{- $mastertag := required "mastertag missing: no day1 platform-config file at sites/<site>/mces/<mce>/version.yaml, or it lacks the key" .Values.mastertag | toString -}}
+{{- $ocpVersion := $mastertag | splitList "-" | first -}}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ .Values.group }}-in-cluster
+  namespace: gitops-{{ .Values.group }}
+  labels:
+    day2.gitops/team: '{{ .Values.group }}'
+    day2.gitops/env: '{{ .Values.env }}'
+    day2.gitops/site: '{{ .Values.site }}'
+    day2.gitops/mce: '{{ .Values.mce }}'
+    day2.gitops/cluster: in-cluster
+    # The MCE's own OCP version — in-cluster charts resolve version layers by it.
+    day2.gitops/ocp-version: '{{ $ocpVersion }}'
+    day2.gitops/role: mce
+spec:
+  project: '{{ .Values.group }}'
+  sources:
+    - repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/argocd-day2-platform.git'
+      targetRevision: main
+      path: operators
+      helm:
+        ignoreMissingValueFiles: true
+        # This app's FIRST $values reference. The team's fleet-default opt-out
+        # matrix is a generation input, not workload config — the operators
+        # chart turns it into `exclude:` entries in its defaults/mces
+        # generator. Absent file -> nothing resolves (ignoreMissingValueFiles)
+        # -> no exclusions, which is the normal state. The inline values below
+        # are applied after valueFiles, so `mastertag` cannot be shadowed from
+        # here.
+        valueFiles:
+          - '$values/defaults/mces/exclusions.yaml'
+        values: |
+          group: '{{ .Values.group }}'
+          mce: {{ .Values.mce }}
+          mcePath: {{ .Values.mcePath }}
+          cluster: 'in-cluster'
+          clusterPath: {{ .Values.mcePath }}/in-cluster
+          env: {{ .Values.env }}
+          site: {{ .Values.site }}
+          # Pass the raw tag, not the derived version: the operators chart
+          # derives it the same way for hosted clusters, so there is exactly
+          # one derivation rule in the chain.
+          mastertag: '{{ $mastertag }}'
+    - repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+      targetRevision: main
+      ref: values
+  destination:
+    name: in-cluster
+    namespace: gitops-{{ .Values.group }}
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - CreateNamespace=true

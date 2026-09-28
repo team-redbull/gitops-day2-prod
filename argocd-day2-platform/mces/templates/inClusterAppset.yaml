@@ -1,0 +1,49 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: {{ .Values.group }}-in-cluster
+  namespace: gitops-{{ .Values.group }}
+spec:
+  generators:
+    - git:
+        repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+        revision: main
+        directories:
+          - path: "defaults/hub/*"
+  template:
+    metadata:
+      name: '{{ .Values.group }}-in-cluster-{{ "{{" }}path.basename{{ "}}" }}'
+      labels:
+        day2.gitops/team: '{{ .Values.group }}'
+        day2.gitops/chart: '{{ "{{" }}path.basename{{ "}}" }}'
+        # No env/site/mce/ocp-version labels: the prod-hub is version-less and
+        # outside the sites/ tree.
+        day2.gitops/role: hub
+    spec:
+      project: '{{ .Values.group }}'
+      sources:
+        - repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/argocd-day2-platform.git'
+          targetRevision: main
+          path: deploy
+          helm:
+            ignoreMissingValueFiles: true
+            values: |
+              group: '{{ .Values.group }}'
+              cluster: in-cluster
+              hub: true
+              operator: {{ "{{" }}path.basename{{ "}}" }}
+            valueFiles:
+              - '$values/operators/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+              - '$values/defaults/hub/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+        - ref: values
+          repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+          targetRevision: main
+      destination:
+        name: in-cluster
+        namespace: gitops-{{ .Values.group }}
+      syncPolicy:
+        automated:
+          selfHeal: true
+          prune: false
+        syncOptions:
+          - CreateNamespace=true

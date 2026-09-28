@@ -1,0 +1,105 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  {{- if .Values.appname }}
+  name: {{ .Values.appname }}
+  {{- else }}
+  name: {{ .Values.group }}-{{ .Values.cluster }}-{{ .Values.operator }}-deploy
+  {{- end }}
+  # Which Argo instance holds this leaf. Default: the team namespace on the
+  # Argo that rendered it. UPI: openshift-gitops-upi, passed down from
+  # upiAppset through the operators chart.
+  namespace: {{ .Values.argoNamespace | default (printf "gitops-%s" .Values.group) }}
+  labels:
+    day2.gitops/team: '{{ .Values.group }}'
+    day2.gitops/chart: '{{ .Values.operator }}'
+    {{- if .Values.hub }}
+    day2.gitops/role: hub
+    {{- else }}
+    day2.gitops/env: '{{ .Values.env }}'
+    day2.gitops/site: '{{ .Values.site }}'
+    {{- if .Values.mce }}
+    day2.gitops/mce: '{{ .Values.mce }}'
+    {{- end }}
+    day2.gitops/cluster: '{{ .Values.cluster }}'
+    {{- if .Values.ocpVersion }}
+    day2.gitops/ocp-version: '{{ .Values.ocpVersion }}'
+    {{- end }}
+    {{- if eq .Values.cluster "in-cluster" }}
+    day2.gitops/role: mce
+    {{- else if .Values.upi }}
+    day2.gitops/role: upi
+    {{- else }}
+    day2.gitops/role: hosted-cluster
+    {{- end }}
+    {{- end }}
+spec:
+  project: '{{ .Values.group }}'
+  sources:
+    - repoURL: '{{ .Values.repourl }}'
+      targetRevision: '{{ .Values.targetRevision | default "HEAD" }}'
+      path: {{ .Values.path | default "." }}
+      helm:
+        {{- if .Values.oldConvention }}
+        releaseName: {{ .Values.cluster }}-{{ .Values.group }}-{{ .Values.operator }}
+        {{- else }}
+        releaseName: {{ .Values.operator }}
+        {{- end }}
+        ignoreMissingValueFiles: true
+        # Workload-values stack, lowest -> highest. Every layer is optional.
+        valueFiles:
+          {{- if .Values.hub }}
+          # Hub-wide, chart-agnostic — the hub's analogue of sites/<site>/values.yaml
+          # in the fleet branch below. It exists for a value MORE THAN ONE hub chart
+          # needs and no runtime ConfigMap can carry across namespaces (siteNetworks:
+          # segments-manager and segment-lifecycle-worker must agree on the site list).
+          # Optional like every other layer (ignoreMissingValueFiles), so a team
+          # without the file is unaffected.
+          - '$values/defaults/hub/values.yaml'
+          - '$values/operators/{{ .Values.operator }}/values.yaml'
+          - '$values/defaults/hub/{{ .Values.operator }}/values.yaml'
+          {{- else }}
+          - '$values/operators/{{ .Values.operator }}/values.yaml'
+          {{- if .Values.ocpVersion }}
+          - '$values/operators/{{ .Values.operator }}/ocp-versions/{{ .Values.ocpVersion }}/values.yaml'
+          {{- end }}
+          - '$values/sites/{{ .Values.site }}/values.yaml'
+          - '$values/sites/{{ .Values.site }}/{{ .Values.env }}/values.yaml'
+          {{- if eq .Values.cluster "in-cluster" }}
+          - '$values/defaults/mces/{{ .Values.operator }}/values.yaml'
+          - '$values/defaults/mces/{{ .Values.operator }}/values-{{ .Values.env }}.yaml'
+          - '$values/defaults/mces/{{ .Values.operator }}/values-{{ .Values.mce }}.yaml'
+          {{- else if .Values.upi }}
+          - '$values/defaults/upi/{{ .Values.operator }}/values.yaml'
+          - '$values/defaults/upi/{{ .Values.operator }}/values-{{ .Values.env }}.yaml'
+          - '$values/defaults/upi/{{ .Values.operator }}/values-{{ .Values.cluster }}.yaml'
+          {{- else }}
+          - '$values/defaults/hosted-clusters/{{ .Values.operator }}/values.yaml'
+          - '$values/defaults/hosted-clusters/{{ .Values.operator }}/values-{{ .Values.env }}.yaml'
+          - '$values/defaults/hosted-clusters/{{ .Values.operator }}/values-{{ .Values.cluster }}.yaml'
+          {{- end }}
+          # MCE-wide slot; for a UPI cluster, the UPI-wide slot at its site+env
+          # (sites/<site>/<env>/upi/values.yaml). Never an unguarded empty path:
+          # '$values//values.yaml' would resolve to the sigs repo root.
+          {{- if .Values.upi }}
+          - '$values/{{ .Values.upiPath }}/values.yaml'
+          {{- else }}
+          - '$values/{{ .Values.mcePath }}/values.yaml'
+          {{- end }}
+          - '$values/{{ .Values.clusterPath }}/values.yaml'
+          - '$values/{{ .Values.clusterPath }}/{{ .Values.operator }}/values.yaml'
+          {{- end }}
+    - repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+      targetRevision: main
+      ref: values
+  destination:
+    name: "{{ .Values.cluster }}"
+    {{- if .Values.projectNamespace }}
+    namespace: {{ .Values.projectNamespace }}
+    {{- end }}
+  {{- if .Values.syncPolicy }}
+  syncPolicy: {{- toYaml .Values.syncPolicy | nindent 8 }}
+  {{- end }}
+  {{- if .Values.ignoreDifferences }}
+  ignoreDifferences: {{- toYaml .Values.ignoreDifferences | nindent 8 }}
+  {{- end }}

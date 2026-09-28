@@ -1,0 +1,91 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: {{ .Values.group }}-upi
+  namespace: gitops-{{ .Values.group }}
+spec:
+  generators:
+    - git:
+        repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+        revision: main
+        # A UPI cluster is a FOLDER under sites/<site>/<env>/upi/ — a sibling of
+        # mces/ at the same depth, so path[1] = site and path[2] = env mean
+        # exactly what they mean in mcesAppset. It is NOT under an MCE: a UPI
+        # cluster is standalone, with no MCE and no Argo of its own.
+        #
+        # directories: globs are matched with Go path.Match, where '*' matches
+        # exactly ONE path segment. Depth-exact by the engine: this can never
+        # reach a chart folder one level down, and the optional
+        # sites/<site>/<env>/upi/values.yaml (the UPI-wide value slot) is a
+        # file, which a directories: generator never sees. mcesAppset's
+        # sites/*/*/mces/* has a literal `mces` segment, so the two globs can
+        # never match the same folder.
+        #
+        # Folder existence is the opt-in — no marker file. git cannot track an
+        # empty folder: a cluster onboarded before it has any content needs a
+        # .gitkeep to exist here at all. There is NO day1 parity check for UPI
+        # clusters (day1 does not know them), so a stray folder here becomes a
+        # phantom app aimed at a cluster that does not exist; the only offline
+        # signal is an unexpected `apps added` line in render-verify's compare.
+        directories:
+          - path: "sites/*/*/upi/*"
+  template:
+    metadata:
+      name: '{{ .Values.group }}-{{ "{{" }}path.basename{{ "}}" }}'
+      labels:
+        day2.gitops/team: '{{ .Values.group }}'
+        day2.gitops/env: '{{ "{{" }}path[2]{{ "}}" }}'
+        day2.gitops/site: '{{ "{{" }}path[1]{{ "}}" }}'
+        day2.gitops/cluster: '{{ "{{" }}path.basename{{ "}}" }}'
+        # No mce label: there is no MCE. No ocp-version label: this is a
+        # discovery layer — it only points the operators chart at the
+        # (optional) version file.
+        day2.gitops/role: upi
+    spec:
+      project: '{{ .Values.group }}'
+      sources:
+        - repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/argocd-day2-platform.git'
+          targetRevision: main
+          path: operators
+          helm:
+            ignoreMissingValueFiles: true
+            valueFiles:
+              # Generation input, not workload config: the team's fleet-default
+              # opt-out matrix. FIRST on purpose — the version file must
+              # outrank it (same order as clustersAppset).
+              - '$values/defaults/upi/exclusions.yaml'
+              # The UPI cluster's OCP version, OPTIONAL. day1 provisions hosted
+              # clusters only, so a UPI cluster declares its own version in its
+              # own folder: `mastertag` and nothing else (any other key lands as
+              # a chart value). Absent -> the cluster is version-less like
+              # prod-hub: no ocp-versions/<v>/ layers, no ocp-version label.
+              - '$values/{{ "{{" }}path{{ "}}" }}/version.yaml'
+            # argoNamespace is where the operators ApplicationSet and every app
+            # below it are created: the namespace instance B (the UPI Argo)
+            # reconciles. The same string is in upiAppProjectApp.yaml.
+            values: |
+              group: '{{ .Values.group }}'
+              cluster: '{{ "{{" }}path.basename{{ "}}" }}'
+              clusterPath: '{{ "{{" }}path{{ "}}" }}'
+              upiPath: 'sites/{{ "{{" }}path[1]{{ "}}" }}/{{ "{{" }}path[2]{{ "}}" }}/upi'
+              env: '{{ "{{" }}path[2]{{ "}}" }}'
+              site: '{{ "{{" }}path[1]{{ "}}" }}'
+              upi: true
+              argoNamespace: openshift-gitops-upi
+        - repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+          targetRevision: main
+          ref: values
+      # THE HANDOVER. This app lives on instance A (openshift-gitops), next to
+      # the per-MCE apps, but writes the operators chart into the namespace
+      # instance B (openshift-gitops-upi) reconciles — the same move
+      # mcesAppset makes onto an MCE's Argo, except B runs on this same
+      # cluster, so the hop is by namespace, not by cluster. B then generates
+      # the chart apps and leaves and syncs them to the UPI cluster with the
+      # cluster secret it already holds; A never needs one.
+      destination:
+        name: in-cluster
+        namespace: openshift-gitops-upi
+      syncPolicy:
+        automated:
+          selfHeal: true
+          prune: false

@@ -1,0 +1,6 @@
+name: cluster-roles.yaml
+repoUrl: ...helm-charts...
+targetRevision: main
+syncPolicy:
+  syncOptions:
+    - CreateNamespace=true

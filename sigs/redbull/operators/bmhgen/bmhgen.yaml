@@ -1,0 +1,5 @@
+projectNamespace: metal3-system
+repoUrl: ....helm-charts...
+syncPolicy:
+  syncOptions:
+    - CreateNamespace=true

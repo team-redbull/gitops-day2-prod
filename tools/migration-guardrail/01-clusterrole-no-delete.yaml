@@ -1,0 +1,56 @@
+# The migration guard rail: everything except delete, plus full control over
+# Argo's own CRs.
+#
+# Apply to EVERY identity that can write to a destination cluster — see the
+# four-identity table in README.md. Applying it only on prod-hub protects
+# essentially nothing of the fleet.
+#
+# Lifetime: the Phase C -> Phase E window. Remove afterwards (README "Lift").
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argocd-no-delete-role
+  labels:
+    day2.gitops/purpose: migration-guardrail
+rules:
+  # 1. Everything except delete/deletecollection, on every resource.
+  #
+  #    resources: ["*"] DOES match subresources (applications/status, pods/log,
+  #    deployments/scale ...) — the RBAC authorizer builds "resource/subresource"
+  #    and returns true on the "*" wildcard — so the controller's own status
+  #    writes keep working. Do not add per-subresource rules.
+  #
+  #    deletecollection is omitted alongside delete on purpose: granting only
+  #    `delete` would leave the collection form as an open door.
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+  # 2. Argo's own CRs stay fully deletable — this is the point of the exercise.
+  #    Apps and appsets can be deleted and recreated freely during the tree
+  #    moves; rule 1 is what stops that from reaching the workloads.
+  #
+  #    NOTE appprojects are deliberately NOT here. They are created by the
+  #    appProjectAppset from the external helm-charts/argo-appproject repo and
+  #    nothing in this migration deletes them.
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "applicationsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
+
+  # 3. Discovery. resources:["*"] does not cover non-resource URLs — they are a
+  #    separate authorizer path and a separate rule field — and the operator's
+  #    default app-controller role grants nonResourceURLs:["*"]. The controller
+  #    walks /api and /apis/<group>/<version> to learn every kind the cluster
+  #    serves, which is how it can diff a CR it has never seen before.
+  #
+  #    Most clusters bind system:discovery to system:authenticated so this works
+  #    anyway; on a hardened cluster it does not, and the symptom looks nothing
+  #    like an RBAC problem. Cheap insurance.
+  - nonResourceURLs: ["*"]
+    verbs: ["get"]
+
+  # No escalate/bind/use rule — deliberately. See README "Escalation prevention".
+  # Without them Argo genuinely cannot author a role granting itself delete,
+  # which makes this a real boundary rather than only an accident guard. The
+  # cost is that manual syncs of RBAC-shipping charts fail during the window;
+  # that is a procedural rule, not a manifest change. See 04-breakglass.yaml.

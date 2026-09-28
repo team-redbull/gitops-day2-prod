@@ -1,0 +1,10 @@
+# Example deploy config for a chart on the prod-hub mgmt cluster.
+projectNamespace: example-namespace
+# repourl, all lowercase — that is the key deployApp.yaml reads (`.Values.repourl`).
+# Several deploy configs in this repo write `repoUrl`; that spelling reaches the
+# template as nil and renders an empty repoURL, so do not copy it from them.
+repourl: ...helm-charts...
+targetRevision: main
+syncPolicy:
+  syncOptions:
+    - CreateNamespace=true

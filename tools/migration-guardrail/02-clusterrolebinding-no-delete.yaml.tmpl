@@ -1,0 +1,30 @@
+# Binds the guard rail to the local Argo identities on ONE cluster.
+#
+# TEMPLATE — __INSTANCE__ and __NAMESPACE__ are substituted by apply-local.sh
+# from what the cluster actually has. ServiceAccounts are named
+# <argocd-instance-name>-argocd-<component>; the instance is "openshift-gitops"
+# on a default install, but do not assume the MCE instances match. Take the
+# real names from discover.sh output.
+#
+# argocd-server is included because it is a second identity that writes to
+# resources directly (UI actions, the resource tab). Note that a *cascade* app
+# delete is executed by the application controller during finalization — the
+# server only sets the finalizer and removes the App CR — so a stuck delete is
+# debugged against the controller's permissions, not the server's.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argocd-no-delete-binding
+  labels:
+    day2.gitops/purpose: migration-guardrail
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argocd-no-delete-role
+subjects:
+  - kind: ServiceAccount
+    name: __INSTANCE__-argocd-application-controller
+    namespace: __NAMESPACE__
+  - kind: ServiceAccount
+    name: __INSTANCE__-argocd-server
+    namespace: __NAMESPACE__

@@ -1,0 +1,80 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: {{ .Values.group }}-{{ .Values.mce }}-clusters
+  namespace: gitops-{{ .Values.group }}
+spec:
+  generators:
+    - git:
+        repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+        revision: main
+        # A hosted cluster is any FOLDER in the MCE dir except in-cluster/.
+        # Folder existence is the opt-in — no marker file, because there is no
+        # per-cluster data left to carry: env/site are inherited from the MCE
+        # and the OCP version comes from day1 (below).
+        #
+        # Depth-exact by the engine: directories: globs use Go path.Match,
+        # where '*' stops at '/' (see mcesAppset for why that matters).
+        #
+        # Two consequences worth knowing: a cluster onboarded with no content
+        # of its own needs a .gitkeep (git cannot track an empty folder), and
+        # a stray folder here that is NOT a cluster becomes a phantom app —
+        # render-verify's day1 parity lint catches that before merge, since a
+        # stray folder has no day1 version file.
+        directories:
+          - path: "{{ .Values.mcePath }}/*"
+          - path: "{{ .Values.mcePath }}/in-cluster"
+            exclude: true
+  template:
+    metadata:
+      name: '{{ .Values.group }}-{{ "{{" }}path.basename{{ "}}" }}'
+      labels:
+        day2.gitops/team: '{{ .Values.group }}'
+        day2.gitops/env: '{{ .Values.env }}'
+        day2.gitops/site: '{{ .Values.site }}'
+        day2.gitops/mce: '{{ .Values.mce }}'
+        day2.gitops/cluster: '{{ "{{" }}path.basename{{ "}}" }}'
+        # No ocp-version label here: this layer never learns the version. It
+        # only points the operators chart at the day1 file that holds it.
+        day2.gitops/role: hosted-cluster
+    spec:
+      project: '{{ .Values.group }}'
+      sources:
+        - repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/argocd-day2-platform.git'
+          targetRevision: main
+          path: operators
+          helm:
+            ignoreMissingValueFiles: true
+            # The hosted cluster's OCP version enters the chain HERE: its day1
+            # file, named exactly after this folder, carries `mastertag`. The
+            # file's other keys (dhcp_values) are inert — nothing downstream
+            # reads them, and the inline values below outrank them anyway
+            # (Argo applies helm.values after valueFiles).
+            valueFiles:
+              # Generation input, not workload config: the team's fleet-default
+              # opt-out matrix. FIRST on purpose — day1 must outrank it.
+              - '$values/defaults/hosted-clusters/exclusions.yaml'
+              - '$day1/sites/{{ .Values.site }}/mces/{{ .Values.mce }}/hostedClusters/{{ "{{" }}path.basename{{ "}}" }}.yaml'
+            values: |
+              group: '{{ .Values.group }}'
+              mce: {{ .Values.mce }}
+              mcePath: {{ .Values.mcePath }}
+              cluster: '{{ "{{" }}path.basename{{ "}}" }}'
+              clusterPath: '{{ "{{" }}path{{ "}}" }}'
+              env: {{ .Values.env }}
+              site: {{ .Values.site }}
+        - repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day1/platform-config.git'
+          targetRevision: main
+          ref: day1
+        - repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
+          targetRevision: main
+          ref: values
+      destination:
+        name: in-cluster
+        namespace: gitops-{{ .Values.group }}
+      syncPolicy:
+        automated:
+          selfHeal: true
+          prune: false
+        syncOptions:
+          - CreateNamespace=true
