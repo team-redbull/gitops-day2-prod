@@ -192,7 +192,7 @@ oc get appproject default -n openshift-gitops -o yaml   # used by <team>-upi-app
 | Project | Must allow |
 |---|---|
 | `<team>` on A | destination `in-cluster` (server `https://kubernetes.default.svc`) with namespace `openshift-gitops-upi`; the `argoproj.io/ApplicationSet` kind if the project whitelists namespaced kinds; the platform and sigs repos as sources (already true today) |
-| `default` on A | destination `in-cluster` / `openshift-gitops-upi`; the `helm-charts/argo-appproject` repo as a source (the existing `<team>-app-projects-*` apps already use it) |
+| `default` on A | destination `in-cluster` / `openshift-gitops-upi`; the `helm-charts/argo-appproject` repo as a source (the existing `<team>-app-projects-*` apps already use it). Its `sourceNamespaces` may stay empty: `<team>-upi-app-project` lives in `openshift-gitops`, A's own namespace, like the `<team>-app-projects-*` apps |
 
 A destination of `*` / `*` satisfies both. If `<team>` is too narrow, widen it
 in the external `argo-appproject` chart (check 7), since that chart defines it.
@@ -201,16 +201,37 @@ in the external `argo-appproject` chart (check 7), since that chart defines it.
 the Helm chart at `<GITLAB>/redbull/helm-charts/argo-appproject.git` that
 creates each team's AppProject; day2 passes it only `group: <team>`. Today it
 runs once per cluster registered on A. The new `<team>-upi-app-project` app
-runs it once more, into B's namespace on the hub cluster. Read its templates
-and confirm:
+runs it once more, into B's namespace on the hub cluster, and passes
+`createNamespace: false`.
 
-1. **It creates only namespaced objects.** A cluster-scoped object (a
-   ClusterRole, a Namespace) would already be owned by
-   `<team>-app-projects-in-cluster` on the same cluster, and two apps would
-   fight over it. If it has one, stop: the chart needs a switch to skip it, or
-   B's AppProject needs its own small chart.
-2. **The AppProject lands in the destination namespace** (the release
-   namespace), not in a hardcoded `openshift-gitops`.
+The chart as it stood before UPI (no `values.yaml`; `templates/namespace.yaml`
+with Namespace `gitops-<group>`; `templates/appProject.yaml` with a hardcoded
+`namespace: openshift-gitops`) needs one small MR of its own, merged **before**
+§4. Confirm it has landed:
+
+1. **The Namespace can be switched off.** On prod-hub, `gitops-<team>` already
+   belongs to `<team>-app-projects-in-cluster`; a second app rendering it would
+   fight over it. The chart needs `values.yaml` with `createNamespace: true`
+   and `{{- if .Values.createNamespace }}` around `namespace.yaml`. Keep the
+   default in `values.yaml`: `default true` in the template would turn an
+   explicit `false` back into `true`, and no default at all would drop the
+   Namespace from every existing app.
+2. **The AppProject lands in the release namespace:**
+   `namespace: {{ .Release.Namespace }}` instead of `openshift-gitops`. Argo
+   renders with the app's destination namespace, which is `openshift-gitops`
+   for every existing `<team>-app-projects-<cluster>` app, so their output does
+   not change.
+
+   ```bash
+   cd argo-appproject
+   helm template t . --namespace openshift-gitops --set group=<team>
+   #   -> Namespace gitops-<team> + AppProject in openshift-gitops, same as before the MR
+   helm template t . --namespace openshift-gitops-upi --set group=<team> --set createNamespace=false
+   #   -> ONE object: AppProject <team> in openshift-gitops-upi
+   ```
+
+   After the chart MR, every `<team>-app-projects-*` app on A stays Synced with
+   no diff.
 3. **The AppProject allows what B needs:**
    - destinations `in-cluster` / `openshift-gitops-upi` (the chart apps write
      their leaf Applications there) and the UPI clusters by name, in any
@@ -307,8 +328,8 @@ resources-finalizer, like the rest of the chain.
 
 | Step | What | Gate before the next step |
 |---|---|---|
-| a | §1, all eleven checks | all green, or their fix applied |
-| b | §4 platform patches + §5 harness patches, one MR in `<platform>` | **offline**: §7.1 compare for every team shows only `apps added: ['prod-hub:<team>-upi-app-project']` and `IDENTITY OK`. **live**: `<team>-upi-app-project` is Synced/Healthy in `gitops-<team>` on A for every team, and `oc get appprojects -n openshift-gitops-upi` lists one AppProject per team |
+| a | §1, all eleven checks, including check 7's `argo-appproject` chart MR | all green, or their fix applied. The chart MR is merged and every `<team>-app-projects-*` app on A is still Synced with no diff |
+| b | §4 platform patches + §5 harness patches, one MR in `<platform>` | **offline**: §7.1 compare for every team shows only `apps added: ['prod-hub:<team>-upi-app-project']` and `IDENTITY OK`. **live**: `<team>-upi-app-project` is Synced/Healthy in `openshift-gitops` on A for every team, and `oc get appprojects -n openshift-gitops-upi` lists one AppProject per team |
 | c | §6.1 `defaults/upi/README.md` in each sigs repo (optional, docs only) | offline compare unchanged |
 | d | §6.2 the first UPI cluster folder, in one team's repo | **offline**: §7.2 compare shows only `apps added` (1 on `prod-hub`, 2 per chart on `prod-hub-upi`) and `IDENTITY OK`. **live**: §7.3 |
 | e | more clusters, more teams | the same two gates per MR |
@@ -319,7 +340,7 @@ resources-finalizer, like the rest of the chain.
   `prune: false`, so the two new objects stay behind, inert. Remove them by
   hand: `oc delete applicationset <team>-upi -n gitops-<team>` (it has no apps
   before step d) and `oc delete application <team>-upi-app-project -n
-  gitops-<team>`, then optionally the AppProject `<team>` in
+  openshift-gitops`, then optionally the AppProject `<team>` in
   `openshift-gitops-upi`. The operators and deploy changes need no cleanup:
   they render byte-identically for every existing app.
 - **Step d:** delete the folder, then follow §8.
@@ -457,7 +478,7 @@ has UPI clusters: Helm cannot see folders.
 ```diff
 --- /dev/null
 +++ b/mces/templates/upiAppProjectApp.yaml
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,46 @@
 +{{- /* Plants AppProject <group> into the namespace instance B (the UPI Argo,
 +     openshift-gitops-upi) reconciles, because every app upiAppset hands over
 +     to B references `project: <group>`. The prod-hub counterpart is
@@ -473,7 +494,11 @@ has UPI clusters: Helm cannot see folders.
 +kind: Application
 +metadata:
 +  name: {{ .Values.group }}-upi-app-project
-+  namespace: gitops-{{ .Values.group }}
++  # openshift-gitops, not gitops-<group>: this app uses project `default`, and
++  # Argo admits an app outside its own namespace only if the project's
++  # spec.sourceNamespaces matches it. prod-hub's `default` has none. Same
++  # namespace and project as appProjectAppset's apps, which do the same job.
++  namespace: openshift-gitops
 +  annotations:
 +    argocd.argoproj.io/sync-wave: "-1"
 +  labels:
@@ -488,8 +513,11 @@ has UPI clusters: Helm cannot see folders.
 +    targetRevision: main
 +    helm:
 +      ignoreMissingValueFiles: true
++      # AppProject only: gitops-<group> already exists on prod-hub and belongs
++      # to <group>-app-projects-in-cluster.
 +      values: |
 +        group: '{{ .Values.group }}'
++        createNamespace: false
 +  destination:
 +    name: in-cluster
 +    namespace: openshift-gitops-upi
@@ -1231,6 +1259,10 @@ grep -rn 'namespace: openshift-gitops-upi\|argoNamespace: openshift-gitops-upi' 
 #    mces/templates/upiAppProjectApp.yaml   namespace: openshift-gitops-upi
 #    mces/templates/upiAppset.yaml          argoNamespace: openshift-gitops-upi
 #    mces/templates/upiAppset.yaml          namespace: openshift-gitops-upi
+grep -c '^  namespace: openshift-gitops$' mces/templates/upiAppProjectApp.yaml
+                                                                  # -> 1 (A's own namespace: project default has no sourceNamespaces)
+grep -c 'createNamespace: false' mces/templates/upiAppProjectApp.yaml
+                                                                  # -> 1 (B gets the AppProject only, check 7)
 grep -c '\$day1' mces/templates/upiAppset.yaml                    # -> 0 (UPI never reads day1)
 grep -c '| ternary' operators/templates/operators.yaml deploy/templates/deployApp.yaml
                                                                   # -> 1 and 0 ($exKey only; never on .Values.upi)
