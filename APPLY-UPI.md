@@ -49,8 +49,14 @@ A UPI cluster's OCP version is optional and lives in its own sigs folder.
 Without `version.yaml` the cluster is version-less like prod-hub: no
 `ocp-versions/<v>/` pins and no `ocp-version` label.
 
-Implemented and render-verified in the mock repo. §7 has the exact harness
-output to expect, and every patch below is the mock's change verbatim.
+**This version is for a platform repo without Phase F and without `tools/`**,
+which is the air-gap's state: `APPLY-EXCLUSIONS.md` (the structural opt-out,
+`exclusions.yaml`) is not applied, and there is no render harness. The mock
+repo does carry Phase F, so §4.1 and §4.3 are the mock's change with every
+exclusions line taken out. All of §4 was applied to a copy of the mock with
+Phase F removed and render-verified there (§7.4). Every offline check below
+needs only `git` and `helm` (§5). For a platform that has Phase F, use the
+earlier version of this guide: `git show 32b36c6:APPLY-UPI.md`.
 
 > `<platform>` below is an `argocd-day2-platform` checkout, `<sigs>` a
 > `sigs/<team>` checkout, `<day1>` a `gitops-day1/platform-config` checkout.
@@ -69,12 +75,10 @@ repo cannot answer for you.
 
 ### 1.1 Repos
 
-**Check 1 — confirm the checkout is the migrated one.** UPI builds on the end
-state of `CHANGES.md` (Phases A→E), `APPLY-EXCLUSIONS.md` (F and G) and
-`APPLY-OCP-VERSIONS.md`. All three are already applied in the air-gap
-(confirmed 2026-09-28), so this is a quick check that the platform checkout
-you are about to patch is that state. The §4 patches use it as context and
-will not apply to anything else.
+**Check 1 — confirm the checkout is the one this guide is written for.** UPI
+builds on the end state of `CHANGES.md` (Phases A→E) and
+`APPLY-OCP-VERSIONS.md`, **without** `APPLY-EXCLUSIONS.md` (Phase F). The §4
+patches use that state as context and will not apply to anything else.
 
 ```bash
 cd <platform>
@@ -82,7 +86,8 @@ grep -c 'sites/\*/\*/mces/\*' mces/templates/mcesAppset.yaml            # -> 1  
 grep -c 'ocp-versions/' deploy/templates/deployApp.yaml                 # -> 1   (rename applied)
 grep -cF 'ocp-versions/{{ $ocpVersion }}/' operators/templates/operators.yaml   # -> 1   (rename applied: the valueFiles line)
 grep -cF 'ocp-versions/<v>/ folder created' operators/templates/operators.yaml  # -> 1   (the preamble comment)
-grep -c 'Values.exclusions' operators/templates/operators.yaml          # -> 1   (Phase F applied)
+grep -c 'Values.exclusions' operators/templates/operators.yaml          # -> 0   (Phase F not applied)
+grep -c 'ref: values' clusters/templates/inClusterApp.yaml              # -> 0   (Phase F not applied)
 grep -c 'argoNamespace' operators/templates/operators.yaml deploy/templates/deployApp.yaml
                                                                         # -> 0 and 0 (this guide not applied yet)
 ls mces/templates/upiAppset.yaml                                        # -> No such file
@@ -90,23 +95,21 @@ ls mces/templates/upiAppset.yaml                                        # -> No 
 
 | Output | What it means | What to do |
 |---|---|---|
-| all as shown | the expected, migrated state | continue |
-| the first, second, third or fifth is `0` | this is not the migrated platform repo: an old clone, or a branch cut before the migration | switch to the migrated `main` and re-run |
+| all as shown | the expected state | continue |
+| the first, second or third is `0` | this is not the migrated platform repo: an old clone, or a branch cut before the migration | switch to the migrated `main` and re-run |
 | only the preamble-comment line is `0` | the rename landed on the live line, but the comment still has the old wording (`APPLY-OCP-VERSIONS.md` §3.2 is comment-only, so nothing caught it). Rendering is fine. The first hunk of §4.3 uses that comment line as context, so `git apply --check` will reject it | run `grep -n 'folder created' operators/templates/operators.yaml` and make that line read exactly `     operators/<chart>/ocp-versions/<v>/ folder created BEFORE day1 flips the`, then re-run |
+| `Values.exclusions` or `ref: values` is `1` | Phase F is applied, fully or partly. §4.3 below will not apply | both `1`: use the Phase F version of this guide, `git show 32b36c6:APPLY-UPI.md`. Only one: F is half-applied; finish or revert it (`APPLY-EXCLUSIONS.md` F.1–F.3) first |
 | `argoNamespace` non-zero, or the file exists | this guide was already (partly) applied | compare with §4 file by file |
 
-**Check 2 — the harness baseline is green.** The harness moved into the
-platform repo with Phase G (`APPLY-EXCLUSIONS.md` G.2). Run it once per sigs
-repo and keep the output: it is the "before" snapshot for §7.
+**Check 2 — the offline render check can run.** The air-gap has no `tools/`
+render harness. §5 replaces it with a short script that renders the platform
+charts with `helm template`, once from `origin/main` and once from your branch,
+and compares the two. It needs:
 
 ```bash
-RENDER=<platform>/tools/render-verify/render_chain.py
-python3 "$RENDER" snapshot --out /tmp/rv-before-<team> \
-    --group <team> --sigs <sigs> --platform <platform> --day1 <day1>
-# -> "snapshot: N apps, M appset CRs", exit 0, no CONSISTENCY CHECK FAILURES
+helm version --short                          # -> v3.x or later
+cd <platform> && git fetch && git rev-parse origin/main   # -> a commit hash
 ```
-
-Any failure here is pre-existing and unrelated to UPI. Fix it first.
 
 ### 1.2 Instance B
 
@@ -148,11 +151,11 @@ one (`oc get sa -n openshift-gitops | grep application-controller`). If any
 answer is `no`, apply this before §3. It deliberately has no `delete` verb:
 nothing in the chain prunes.
 
-If the migration delete guard rail (`tools/migration-guardrail/`) is still
-bound to this controller, its first rule already grants these verbs on every
-resource, so the answers are `yes`. UPI never needs `delete`, so the guard
-rail neither blocks this change nor needs touching for it. Lifting it is its
-own procedure (`tools/migration-guardrail/README.md`, "Lift").
+If the migration delete guard rail is still bound to this controller, its
+first rule already grants these verbs on every resource, so the answers are
+`yes`. UPI never needs `delete`, so the guard rail neither blocks this change
+nor needs touching for it. Lifting it is its own procedure (the guard-rail
+runbook, "Lift").
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -271,8 +274,9 @@ oc get secret -n openshift-gitops-upi -l argocd.argoproj.io/secret-type=cluster 
 Every leaf app targets `destination.name: <folder name>`, resolved by B. Name
 each folder after an existing secret, never the reverse. A name that is not in
 this list gives an app that errors and deploys nothing. Also check that no UPI
-cluster shares a name with an MCE or a hosted cluster. The harness enforces
-that within one sigs repo, but only you can see across all five.
+cluster shares a name with an MCE or a hosted cluster of any of the five teams.
+Nothing checks this offline. An MCE name is the worst case: the UPI wrapper
+and that MCE's app on A would both be named `<team>-<name>`.
 
 **Check 10 — no day2 name is already taken in B's namespace.**
 
@@ -299,8 +303,9 @@ only after it is gone from gitops-upi.
 **Nothing that exists today renders differently.** Every new template branch
 sits behind `.Values.upi`, which no existing app sets, or behind a default
 equal to today's string (`argoNamespace` defaults to `gitops-<team>`). In the
-mock, all 33 existing Applications and all 12 existing ApplicationSets have a
-byte-identical spec after the change (§7.1).
+mock with Phase F removed, all 35 existing Applications and all 12 existing
+ApplicationSets have a byte-identical spec after the change (§7.4). §5 checks
+the same property on your own templates.
 
 **The new generator cannot match an existing folder.** Discovery uses
 `directories:` globs, where `*` matches exactly one path segment:
@@ -329,10 +334,10 @@ resources-finalizer, like the rest of the chain.
 | Step | What | Gate before the next step |
 |---|---|---|
 | a | §1, all eleven checks, including check 7's `argo-appproject` chart MR | all green, or their fix applied. The chart MR is merged and every `<team>-app-projects-*` app on A is still Synced with no diff |
-| b | §4 platform patches + §5 harness patches, one MR in `<platform>` | **offline**: §7.1 compare for every team shows only `apps added: ['prod-hub:<team>-upi-app-project']` and `IDENTITY OK`. **live**: `<team>-upi-app-project` is Synced/Healthy in `openshift-gitops` on A for every team, and `oc get appprojects -n openshift-gitops-upi` lists one AppProject per team |
-| c | §6.1 `defaults/upi/README.md` in each sigs repo (optional, docs only) | offline compare unchanged |
-| d | §6.2 the first UPI cluster folder, in one team's repo | **offline**: §7.2 compare shows only `apps added` (1 on `prod-hub`, 2 per chart on `prod-hub-upi`) and `IDENTITY OK`. **live**: §7.3 |
-| e | more clusters, more teams | the same two gates per MR |
+| b | §4 platform patches, one MR in `<platform>` | **before merge**: §5 prints `RESULT: PASS` and the §10 greps match. **after merge**: §7.1 — `<team>-upi-app-project` is Synced/Healthy in `openshift-gitops` on A for every team, and `oc get appprojects -n openshift-gitops-upi` lists one AppProject per team |
+| c | §6.1 `defaults/upi/README.md` in each sigs repo (optional, docs only) | none: a plain file, no generator reads it |
+| d | §6.2 the first UPI cluster folder, in one team's repo | **before merge**: the §6.2 review list. **after merge**: §7.2 and §7.3 |
+| e | more clusters, more teams | the same gates per MR |
 
 **Rollback.**
 
@@ -350,9 +355,12 @@ resources-finalizer, like the rest of the chain.
 ## 4. Platform repo — `argocd-day2-platform`
 
 Two new files and two edited ones. Every block below is a unified diff with
-paths relative to the platform repo root, and the mock's change verbatim
-except for one substitution: the GitLab host in `repoURL:` lines is written
-`<GITLAB>`. No context line contains the host, so only added lines carry it.
+paths relative to the platform repo root. §4.2 and §4.4 are the mock's change
+verbatim. §4.1 and §4.3 are the mock's change without Phase F: no
+`defaults/upi/exclusions.yaml` valueFile, and no `$exclusions`, `$excluded`,
+`$isMce` or `$exKey` lines. One substitution throughout: the GitLab host in
+`repoURL:` lines is written `<GITLAB>`. No context line contains the host, so
+only added lines carry it.
 
 To apply by patch, save each block to a file in `<platform>`, put your real
 host in, then check and apply:
@@ -375,7 +383,7 @@ namespace that replaces the MCE hop by cluster.
 ```diff
 --- /dev/null
 +++ b/mces/templates/upiAppset.yaml
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,87 @@
 +apiVersion: argoproj.io/v1alpha1
 +kind: ApplicationSet
 +metadata:
@@ -384,7 +392,7 @@ namespace that replaces the MCE hop by cluster.
 +spec:
 +  generators:
 +    - git:
-+        repoURL: 'https://<GITLAB>/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
++        repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
 +        revision: main
 +        # A UPI cluster is a FOLDER under sites/<site>/<env>/upi/ — a sibling of
 +        # mces/ at the same depth, so path[1] = site and path[2] = env mean
@@ -403,8 +411,8 @@ namespace that replaces the MCE hop by cluster.
 +        # empty folder: a cluster onboarded before it has any content needs a
 +        # .gitkeep to exist here at all. There is NO day1 parity check for UPI
 +        # clusters (day1 does not know them), so a stray folder here becomes a
-+        # phantom app aimed at a cluster that does not exist; the only offline
-+        # signal is an unexpected `apps added` line in render-verify's compare.
++        # phantom app aimed at a cluster that does not exist. Nothing catches
++        # that offline: check every new folder name against B's cluster secrets.
 +        directories:
 +          - path: "sites/*/*/upi/*"
 +  template:
@@ -422,16 +430,12 @@ namespace that replaces the MCE hop by cluster.
 +    spec:
 +      project: '{{ .Values.group }}'
 +      sources:
-+        - repoURL: 'https://<GITLAB>/redbull/gitops-day2-prod/argocd-day2-platform.git'
++        - repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/argocd-day2-platform.git'
 +          targetRevision: main
 +          path: operators
 +          helm:
 +            ignoreMissingValueFiles: true
 +            valueFiles:
-+              # Generation input, not workload config: the team's fleet-default
-+              # opt-out matrix. FIRST on purpose — the version file must
-+              # outrank it (same order as clustersAppset).
-+              - '$values/defaults/upi/exclusions.yaml'
 +              # The UPI cluster's OCP version, OPTIONAL. day1 provisions hosted
 +              # clusters only, so a UPI cluster declares its own version in its
 +              # own folder: `mastertag` and nothing else (any other key lands as
@@ -450,7 +454,7 @@ namespace that replaces the MCE hop by cluster.
 +              site: '{{ "{{" }}path[1]{{ "}}" }}'
 +              upi: true
 +              argoNamespace: openshift-gitops-upi
-+        - repoURL: 'https://<GITLAB>/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
++        - repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
 +          targetRevision: main
 +          ref: values
 +      # THE HANDOVER. This app lives on instance A (openshift-gitops), next to
@@ -536,18 +540,22 @@ Six changes, all inert for existing renders:
   guarded.
 - **`$argoNs`:** the namespace of the ApplicationSet and of every app it
   generates. It defaults to `gitops-<team>`, so today's output is unchanged.
-- **`$role`:** three kinds, built with if/else. `ternary` on the nil
-  `.Values.upi` would abort every existing render.
+- **`$role`:** three kinds, built with if/else on `eq .Values.cluster
+  "in-cluster"` and `.Values.upi`. `ternary` on the nil `.Values.upi` would
+  abort every existing render.
 - **Generator:** a `defaults/upi/*` branch, placed **before** the
   hosted-cluster branch, which would otherwise catch every non-MCE destination.
 - **Labels and inline values:** `mce` only when set, and `upi`, `upiPath` and
   `argoNamespace` passed down only for UPI.
 - **Config stack:** `defaults/upi/<c>/<c>.yaml` as the UPI defaults layer.
 
+Without Phase F there is no exclusions code: the new `defaults/upi/*`
+generator has no `exclude:` entries, like the two existing ones.
+
 ```diff
 --- a/operators/templates/operators.yaml
 +++ b/operators/templates/operators.yaml
-@@ -3,20 +3,35 @@
+@@ -3,18 +3,42 @@
                             (sites/<site>/mces/<mce>/hostedClusters/<cluster>.yaml)
         the MCE itself   -> passed inline by inClusterApp, from the MCE's day1
                             version.yaml (day2-owned; day1 never reads it)
@@ -575,39 +583,16 @@ Six changes, all inert for existing renders:
 +     clusters). UPI: upiAppset passes openshift-gitops-upi, the namespace the
 +     UPI Argo instance reconciles on the hub cluster. */ -}}
 +{{- $argoNs := .Values.argoNamespace | default (printf "gitops-%s" .Values.group) -}}
- {{- /* Fleet-default exclusions — the one structural opt-out from
--     defaults/mces/ and defaults/hosted-clusters/.
-+     defaults/mces/, defaults/hosted-clusters/ and defaults/upi/.
-      The data CANNOT live per-chart: chart folders are discovered from git at
-      generator time, and this template only ever sees Helm VALUES. So it
-      arrives from ONE fixed-path file per scope, defaults/<scope>/
-      exclusions.yaml, resolved by the parent Application (clustersAppset /
--     inClusterApp) through its $values ref source. Absent file -> empty dict
-+     inClusterApp / upiAppset) through its $values ref source. Absent file -> empty dict
-      -> zero exclude entries -> byte-identical output to before this feature,
-      which is the permanent state of any team that never writes one.
-      A key naming a chart that does not exist, or a name that is not a real
-@@ -27,8 +42,18 @@
- {{-   fail (printf "defaults/<scope>/exclusions.yaml: `exclusions` must be a map of <chart> -> [names], got %s" (kindOf $exclusions)) -}}
- {{- end -}}
- {{- $isMce := eq .Values.cluster "in-cluster" -}}
 +{{- /* Three destination kinds, one template. if/else, NOT a ternary:
 +     .Values.upi is nil on every MCE and hosted-cluster render, and sprig's
 +     ternary requires a real bool — a nil there aborts the render. */ -}}
 +{{- $role := "hosted-cluster" -}}
-+{{- if $isMce -}}
++{{- if eq .Values.cluster "in-cluster" -}}
 +{{-   $role = "mce" -}}
 +{{- else if .Values.upi -}}
 +{{-   $role = "upi" -}}
 +{{- end -}}
- {{- /* MCE hubs key on the MCE name (.Values.cluster is the literal
--     "in-cluster" for every one of them); hosted clusters on the folder name. */ -}}
-+     "in-cluster" for every one of them); hosted clusters and UPI clusters on
-+     the folder name. */ -}}
- {{- $exKey := $isMce | ternary .Values.mce .Values.cluster -}}
- {{- $excluded := list -}}
- {{- range $chart, $names := $exclusions -}}
-@@ -45,7 +70,7 @@
+ apiVersion: argoproj.io/v1alpha1
  kind: ApplicationSet
  metadata:
    name: {{ .Values.group }}-{{ .Values.cluster }}-operators
@@ -616,29 +601,23 @@ Six changes, all inert for existing renders:
  spec:
    generators:
      - git:
-@@ -68,6 +93,21 @@
-           - path: "defaults/mces/{{ $chart }}"
-             exclude: true
-           {{- end }}
+@@ -28,6 +52,15 @@ spec:
+         revision: main
+         directories:
+           - path: "defaults/mces/*"
 +    {{- else if .Values.upi }}
 +    # Fleet defaults for UPI clusters: every chart folder here is deployed to
 +    # every UPI cluster of the team. Checked BEFORE the hosted-cluster branch
 +    # below, which would otherwise catch every non-MCE destination.
 +    - git:
-+        repoURL: 'https://<GITLAB>/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
++        repoURL: 'https://gitlab[REDACTED]/redbull/gitops-day2-prod/sigs/{{ .Values.group }}.git'
 +        revision: main
-+        # Same two constraints as the MCE generator above: same block, and
-+        # byte-for-byte equal to what the include glob emits.
 +        directories:
 +          - path: "defaults/upi/*"
-+          {{- range $chart := $excluded }}
-+          - path: "defaults/upi/{{ $chart }}"
-+            exclude: true
-+          {{- end }}
      {{- else if not .Values.hub }}
      # Fleet defaults for hosted clusters: every chart folder here is deployed
      # to every hosted cluster of the team (mirror of the defaults/mces
-@@ -91,11 +131,15 @@
+@@ -45,11 +78,15 @@ spec:
          day2.gitops/team: '{{ .Values.group }}'
          day2.gitops/env: '{{ .Values.env }}'
          day2.gitops/site: '{{ .Values.site }}'
@@ -655,7 +634,7 @@ Six changes, all inert for existing renders:
      spec:
        project: '{{ .Values.group }}'
        sources:
-@@ -106,23 +150,36 @@
+@@ -60,23 +97,36 @@ spec:
              ignoreMissingValueFiles: true
              values: |
                group: '{{ .Values.group }}'
@@ -692,7 +671,7 @@ Six changes, all inert for existing renders:
                {{- else }}
                - '$values/defaults/hosted-clusters/{{ "{{" }}path.basename{{ "}}" }}/{{ "{{" }}path.basename{{ "}}" }}.yaml'
                {{- end }}
-@@ -132,7 +189,7 @@
+@@ -86,7 +136,7 @@ spec:
            targetRevision: main
        destination:
          name: in-cluster
@@ -791,242 +770,188 @@ hunk.
 `groups/`, `mces/templates/mcesAppset.yaml`, `mces/templates/inClusterAppset.yaml`,
 `mces/templates/appProjectAppset.yaml` and everything under `clusters/`. The
 frozen `namespace: gitops-{{ .Values.repository }}` lines are not copied into
-either new file, and are not touched.
+either new file, and are not touched. Applying this guide does not apply any
+part of Phase F.
 
 ---
 
-## 5. Render harness — `tools/`
+## 5. Offline render check — `helm` only
 
-Same MR as §4, so the platform CI checks the change with the new rules. The
-paths are the mock's. Use wherever your copy lives after `APPLY-EXCLUSIONS.md`
-G.2.
+The mock verifies with a render harness in `tools/`, which the air-gap does not
+have. This script is the offline gate for step b instead. It renders the three
+charts the MR touches with `helm template`, once from `origin/main` and once
+from your working tree, and asserts:
 
-What changes in `render_chain.py`:
+- the `operators` and `deploy` charts render **identically** for every
+  existing destination kind (MCE hub, hosted cluster, prod-hub), with and
+  without the optional deploy-config keys;
+- the `mces` chart output only **gains** the two new objects and loses nothing;
+- the UPI branch renders at all, with and without a version, into
+  `openshift-gitops-upi`.
 
-- **Instance B is modelled.** An app whose destination is `in-cluster` in
-  namespace `openshift-gitops-upi` hands its objects to instance B, reported as
-  `prod-hub-upi:<app>`. Without this, UPI apps would be keyed as prod-hub apps.
-- **`defaults/upi/exclusions.yaml`** is a control file, and `defaults/upi` is
-  an exclusion scope with UPI cluster names as its valid targets.
-- **A UPI `version.yaml`** is its own `version` bucket: changing it is INFO,
-  like a day1 version change. A file with anything but a valid `mastertag` is
-  a check failure. A missing file is fine.
-- **UPI folders are linted:** env folder allow-list, no `in-cluster`, and no
-  reuse of an MCE or hosted-cluster name. There is **no day1 parity check**
-  for UPI, so a stray folder under `upi/` shows only as an unexpected
-  `apps added` line. Read that line on every MR.
+The values are placeholders: which keys are set picks the template branch, the
+names do not matter. YAML comment lines are ignored, as Argo ignores them. Both
+sides get the same minimal `Chart.yaml`, so the result does not depend on it.
 
-```diff
---- a/tools/render-verify/render_chain.py
-+++ b/tools/render-verify/render_chain.py
-@@ -7,12 +7,15 @@
-              -> clusters chart -> clustersAppset + static inClusterApp
-              -> operators chart -> operators appset
-              -> deploy chart   -> leaf workload Application
-+  UPI clusters (no MCE): mces chart -> upiAppset -> operators chart -> deploy
-+             chart, the operators chart handed over by NAMESPACE to the UPI
-+             Argo instance on the same hub cluster (ARGO_BY_NAMESPACE)
- 
- For every generated Application it records identity fields, labels and the
- ordered sequence of *existing* value files (path + content hash) the app
- resolves. Value files come from TWO repos: the sigs repo ($values) and the
--day1 platform-config repo ($day1), which owns every cluster's OCP version as
--`mastertag`. Resolved files land in one of THREE buckets:
-+day1 platform-config repo ($day1), which owns every MCE's and hosted cluster's
-+OCP version as `mastertag`. Resolved files land in one of FOUR buckets:
- 
-   sigs     workload config -> a change here changes what a workload renders
-                               -> HARD
-@@ -24,11 +27,15 @@
-                               would raise a HARD diff on every app in the team
-                               for a change whose real effect is a two-line
-                               APPS DISAPPEARED -> INFO
-+  version  a UPI cluster's own sigs/.../upi/<cluster>/version.yaml (day1 does
-+                              not know UPI clusters, so the folder declares its
-+                              optional version). Same role as a day1 file:
-+                              where versions are SUPPOSED to change -> INFO
- 
- Snapshots taken before/after a change are compared with `compare`: identity
- fields and the sigs-resolved content sequence must be equal; everything else
--(labels, valueFiles path strings, extra ref sources, day1 versions, control
--files) is reported as an expected/informational diff.
-+(labels, valueFiles path strings, extra ref sources, day1 and UPI versions,
-+control files) is reported as an expected/informational diff.
- 
- This simulates the documented ApplicationSet generator parameters only
- ({{path}}, {{path.basename}}, {{path[n]}}, flattened file keys). It is a
-@@ -67,8 +74,17 @@
- # git at generator time and never reach it. Bucketed away from the sigs
- # sequence in compare — see the module docstring.
- CONTROL_FILES = {"defaults/hosted-clusters/exclusions.yaml",
--                 "defaults/mces/exclusions.yaml"}
-+                 "defaults/mces/exclusions.yaml",
-+                 "defaults/upi/exclusions.yaml"}
- ENVS_ALLOWED = {"prod", "prep", "test"}
-+# A UPI cluster's optional version file, in its own sigs folder. A regex, not
-+# a glob: fnmatch's '*' would cross '/'.
-+UPI_VERSION_RE = re.compile(r"^sites/[^/]+/[^/]+/upi/[^/]+/version\.yaml$")
-+# Argo instances reached by NAMESPACE on the same cluster rather than by a
-+# cluster destination: an app whose destination is in-cluster + one of these
-+# namespaces hands its rendered objects to that instance (upiAppset ->
-+# the UPI Argo). Everything else keeps today's rule (in-cluster = same Argo).
-+ARGO_BY_NAMESPACE = {"openshift-gitops-upi": "prod-hub-upi"}
- 
- # All four are set in main(). In this mock the three repos are subdirectories
- # of one checkout; in the air-gapped env they are three separate GitLab
-@@ -307,6 +323,8 @@
-         rel = posixpath.normpath(rel)
-         if repo == "sigs" and rel in CONTROL_FILES:
-             repo = "control"
-+        elif repo == "sigs" and UPI_VERSION_RE.match(rel):
-+            repo = "version"
-         full = os.path.join(root, rel)
-         if os.path.isfile(full):
-             with open(full, "rb") as fh:
-@@ -380,7 +398,11 @@
-     docs = helm_template(chart_dir, values)
- 
-     dest = (spec.get("destination") or {}).get("name")
--    child_argo = argo if dest in (None, "in-cluster") else dest
-+    dest_ns = (spec.get("destination") or {}).get("namespace")
-+    if dest in (None, "in-cluster"):
-+        child_argo = ARGO_BY_NAMESPACE.get(dest_ns, argo)
-+    else:
-+        child_argo = dest
- 
-     for doc in docs:
-         process_doc(snapshot, child_argo, doc, parent_layer=layer)
-@@ -459,6 +481,43 @@
-     return m.group(1)
- 
- 
-+def sigs_mastertag(rel, needed_by):
-+    """Validate a UPI cluster's OPTIONAL version.yaml in the sigs repo.
-+
-+    day1 provisions MCEs and hosted clusters only, so a UPI cluster declares
-+    its own version in its own folder — or none, and is then version-less like
-+    prod-hub. Absent is legal (returns None, no failure). Present means the
-+    same format rule as a day1 tag, and `mastertag` must be the ONLY key: the
-+    file is loaded as a Helm value file, so any other key is a real chart value.
-+    """
-+    full = os.path.join(SIGS, rel)
-+    if not os.path.isfile(full):
-+        return None
-+    with open(full) as fh:
-+        raw = fh.read()
-+    try:
-+        doc = yaml.safe_load(raw)
-+    except yaml.YAMLError as e:
-+        fail(f"{rel}: not parseable as YAML: {e}")
-+        return None
-+    if doc is None:
-+        return None                    # empty file: same as absent
-+    if not isinstance(doc, dict) or set(doc) != {"mastertag"}:
-+        keys = sorted(doc) if isinstance(doc, dict) else type(doc).__name__
-+        fail(f"{rel}: a UPI version file carries `mastertag` and nothing else "
-+             f"(found {keys}) — it is loaded as a Helm value file for "
-+             f"{needed_by}, so every other key becomes a chart value. Delete the "
-+             f"file instead to make the cluster version-less.")
-+        return None
-+    tag = str(doc["mastertag"])
-+    if not MASTERTAG_RE.match(tag):
-+        fail(f"{rel}: mastertag {tag!r} is not <major>.<minor>.<patch>[-<arch>] "
-+             f"— the platform strips the arch at the first '-' and uses the "
-+             f"rest verbatim as ocpVersion")
-+        return None
-+    return tag
-+
-+
- def lint_sigs_tree():
-     """§9.2 consistency checks on the sigs repo.
- 
-@@ -468,6 +527,12 @@
-     carrying the `mastertag` its OCP version is rendered from — that parity
-     check is also what catches a stray folder that is not a cluster, before it
-     becomes a phantom Application.
-+
-+    A UPI cluster is a folder under sites/<site>/<env>/upi/. day1 does not know
-+    UPI clusters, so there is NO parity check for them: a stray folder there is
-+    caught only as an unexpected `apps added` line in compare. What IS checked:
-+    the env folder, the optional version.yaml, and that the name is not already
-+    taken by an MCE or a hosted cluster (cluster names are flat and global).
-     """
-     if git_ls("mces/*/mce.yaml") or git_ls("mces/*/*/hc.yaml"):
-         fail("legacy mces/ layout found: a day1 version file cannot be located "
-@@ -487,6 +552,27 @@
-                 continue               # the MCE hub itself, excluded by the appset
-             day1_mastertag(day1_version_file(site, mce, hc), hc_dir)
- 
-+    # UPI clusters: sites/<site>/<env>/upi/<cluster>, a sibling of mces/ at
-+    # the same depth.
-+    mce_names = {posixpath.basename(d) for d in match_dirs("sites/*/*/mces/*")}
-+    hc_names = ({posixpath.basename(d) for d in match_dirs("sites/*/*/mces/*/*")}
-+                - {"in-cluster"})
-+    for upi_dir in sorted(match_dirs("sites/*/*/upi/*")):
-+        segs = upi_dir.split("/")          # sites/<site>/<env>/upi/<cluster>
-+        env, cluster = segs[2], segs[4]
-+        if env not in ENVS_ALLOWED:
-+            fail(f"{upi_dir}: env folder '{env}' not in {sorted(ENVS_ALLOWED)}")
-+        if cluster == "in-cluster":
-+            fail(f"{upi_dir}: a UPI cluster cannot be named in-cluster — that "
-+                 f"is every Argo's name for its own cluster, and the operators "
-+                 f"chart would render it as an MCE hub")
-+        elif cluster in mce_names or cluster in hc_names:
-+            fail(f"{upi_dir}: UPI folder {cluster!r} reuses an MCE or "
-+                 f"hosted-cluster name — cluster names are flat and global, "
-+                 f"so one name would mean two clusters (for an MCE name, "
-+                 f"`{GROUP}-{cluster}` would also be emitted twice on prod-hub)")
-+        sigs_mastertag(f"{upi_dir}/version.yaml", upi_dir)
-+
-     # Migration window: marker files are inert once the platform reads day1,
-     # but while they still exist they must not contradict it. Legacy markers
-     # carry the STREAM (4.16), day1 carries the full tag (4.16.27-x86_64).
-@@ -544,6 +630,8 @@
-         "defaults/hosted-clusters": ("hosted cluster", sorted(
-             {posixpath.basename(d) for d in match_dirs("sites/*/*/mces/*/*")}
-             - {"in-cluster"})),
-+        "defaults/upi": ("UPI cluster", sorted(
-+            posixpath.basename(d) for d in match_dirs("sites/*/*/upi/*"))),
-     }
- 
-     for scope, (kind, names_known) in sorted(known.items()):
-@@ -725,6 +813,9 @@
-         if _split(o, "day1") != _split(n, "day1"):
-             info.append(f"{uid}: day1 version files {_split(o, 'day1')} -> "
-                         f"{_split(n, 'day1')}")
-+        if _split(o, "version") != _split(n, "version"):
-+            info.append(f"{uid}: UPI version file {_split(o, 'version')} -> "
-+                        f"{_split(n, 'version')}")
-         # The exclusion matrix decides whether apps EXIST, not what they
-         # render. Its real effect shows up as APPS DISAPPEARED (HARD) on the
-         # handful of apps actually excluded — reporting the file's own hash as
+Save the script outside the repo, for example as `/tmp/upi-render-check.sh`,
+and run it from `<platform>` with the §4 changes in the working tree:
+
+```bash
+cd <platform>
+git fetch
+bash /tmp/upi-render-check.sh               # compares against origin/main
 ```
 
-```diff
---- a/tools/ci/README.md
-+++ b/tools/ci/README.md
-@@ -34,7 +34,8 @@
- | check | what it catches |
- |---|---|
- | exclusion Rules 0–3 | a chart name or cluster name in `exclusions.yaml` that does not exist; a stray top-level key; a hub file |
--| day1 parity | an MCE or hosted-cluster folder with no day1 `mastertag` — i.e. **a stray folder that would become a phantom Application** |
-+| day1 parity | an MCE or hosted-cluster folder with no day1 `mastertag` — i.e. **a stray folder that would become a phantom Application**. UPI folders have no day1 file and no parity check: a stray one shows only as an unexpected `apps added` line in `review` |
-+| UPI folders | a UPI cluster folder named `in-cluster` or reusing an MCE / hosted-cluster name; a `version.yaml` in one that carries anything but a valid `mastertag` (the file itself is optional) |
- | DUPLICATE app | THE ONE INVARIANT — two generators emitting one app name (the XOR rule) |
- | DEPTH-AMBIGUOUS `files:` glob | the Phase B prod incident — a `files:` glob matching deeper than intended |
- | unsubstituted `{{ }}` | a placeholder that survived into a generated app |
-@@ -44,7 +45,9 @@
- `compare` adds the second half: HARD on apps disappeared, identity changes
- (name / namespace / project / destination / repoURL / releaseName /
- syncPolicy), ref sources removed, or the resolved **sigs** value-file content
--stack changing. That is what turns an exclusion MR into a reviewable two-line
-+stack changing. A UPI cluster's own `version.yaml` is bucketed like a day1
-+file: changing it is INFO, as a version change is supposed to be. Apps handed
-+to the UPI Argo instance are reported as `prod-hub-upi:<app>`. That is what turns an exclusion MR into a reviewable two-line
- `APPS DISAPPEARED` instead of a guess.
- 
- ## Reading the result
+```bash
+#!/usr/bin/env bash
+# UPI platform MR, offline gate. Run from <platform> with the §4 changes in the
+# working tree. Needs git and helm only.
+# Compares against origin/main, or the ref given as $1.
+set -u
+BASE_REF=${1:-origin/main}
+TMP=$(mktemp -d); OLD=$TMP/old; NEW=$TMP/new; mkdir -p "$OLD" "$NEW"
+git archive "$BASE_REF" | tar -x -C "$OLD" || { echo "cannot read $BASE_REF"; exit 2; }
+cp -R mces operators deploy "$NEW"/
+# Same minimal Chart.yaml on both sides: the render must not depend on it.
+for d in "$OLD" "$NEW"; do for c in mces operators deploy; do
+  printf 'apiVersion: v2\nname: %s\nversion: 0.1.0\n' $c > "$d/$c/Chart.yaml"
+done; done
+rc=0
+
+# Placeholder values. Only which keys are set matters: that picks the branch.
+M='group: t
+env: prod
+site: s1
+mce: m1
+mcePath: sites/s1/prod/mces/m1'
+U='group: t
+env: prod
+site: s1
+cluster: u1
+clusterPath: sites/s1/prod/upi/u1
+upiPath: sites/s1/prod/upi
+upi: true
+argoNamespace: openshift-gitops-upi'
+printf '%s\n' "$M" 'cluster: in-cluster' 'clusterPath: sites/s1/prod/mces/m1/in-cluster' \
+  'mastertag: 4.16.27-x86_64'                                  > $TMP/ops-mce.yaml
+printf '%s\n' "$M" 'cluster: hc1' 'clusterPath: sites/s1/prod/mces/m1/hc1' \
+  'mastertag: 4.16.27-x86_64'                                  > $TMP/ops-hc.yaml
+printf '%s\n' "$M" 'cluster: in-cluster' 'clusterPath: sites/s1/prod/mces/m1/in-cluster' \
+  'ocpVersion: 4.16.27' 'operator: c1'                         > $TMP/dep-mce.yaml
+printf '%s\n' "$M" 'cluster: hc1' 'clusterPath: sites/s1/prod/mces/m1/hc1' \
+  'ocpVersion: 4.16.27' 'operator: c1'                         > $TMP/dep-hc.yaml
+printf '%s\n' 'group: t' 'cluster: in-cluster' 'hub: true' 'operator: c1' > $TMP/dep-hub.yaml
+cat > $TMP/cfg.yaml <<'EOF'
+appname: custom-name
+oldConvention: true
+projectNamespace: ns1
+repourl: https://example.invalid/chart.git
+targetRevision: v1
+path: charts/x
+syncPolicy: {automated: {prune: false, selfHeal: true}}
+ignoreDifferences: [{group: apps, kind: Deployment, jsonPointers: [/spec/replicas]}]
+EOF
+printf '%s\n' "$U" 'mastertag: 4.16.27-x86_64'                 > $TMP/ops-upi.yaml
+printf '%s\n' "$U"                                             > $TMP/ops-upi-nover.yaml
+printf '%s\n' "$U" 'ocpVersion: 4.16.27' 'operator: c1'        > $TMP/dep-upi.yaml
+printf '%s\n' "$U" 'operator: c1'                              > $TMP/dep-upi-nover.yaml
+echo 'group: t'                                                > $TMP/mces.yaml
+
+render() { # dir chart args... -> output on stdout; a failed render prints RENDER-FAILED
+  # YAML comment lines are dropped (Argo never sees them); "# Source:" is kept.
+  { helm template x "$1/$2" "${@:3}" 2>&1 || echo "RENDER-FAILED"; } |
+    awk '!/^[[:space:]]*#/ || /^# Source:/'
+}
+
+same() { # label chart valuefiles...  -> main and branch must render identically
+  local label=$1 chart=$2; shift 2
+  local args=(); for f in "$@"; do args+=(-f "$TMP/$f"); done
+  render "$OLD" "$chart" "${args[@]}" > $TMP/o; render "$NEW" "$chart" "${args[@]}" > $TMP/n
+  if grep -q RENDER-FAILED $TMP/o $TMP/n; then
+    echo "  FAIL  $chart, $label: render error"; grep -h "^Error" $TMP/o $TMP/n | head -3 | sed 's/^/        /'; rc=1
+  elif diff $TMP/o $TMP/n > $TMP/d; then
+    echo "  ok    $chart, $label: identical to $BASE_REF"
+  else
+    echo "  FAIL  $chart, $label: differs from $BASE_REF"; sed 's/^/        /' $TMP/d; rc=1
+  fi
+}
+
+echo "Existing destinations: must render byte-identically"
+same "MCE hub"                  operators ops-mce.yaml
+same "hosted cluster"           operators ops-hc.yaml
+same "MCE hub"                  deploy    dep-mce.yaml
+same "hosted cluster"           deploy    dep-hc.yaml
+same "hosted cluster, all keys" deploy    dep-hc.yaml cfg.yaml
+same "prod-hub"                 deploy    dep-hub.yaml
+same "prod-hub, all keys"       deploy    dep-hub.yaml cfg.yaml
+
+echo "mces chart: only the two new objects may appear"
+render "$OLD" mces -f $TMP/mces.yaml > $TMP/o; render "$NEW" mces -f $TMP/mces.yaml > $TMP/n
+diff $TMP/o $TMP/n > $TMP/d
+if grep -q RENDER-FAILED $TMP/o $TMP/n; then
+  echo "  FAIL  mces: render error"; grep -h "^Error" $TMP/o $TMP/n | head -3 | sed 's/^/        /'; rc=1
+elif grep -q '^<' $TMP/d; then
+  echo "  FAIL  existing mces output changed:"; grep '^<' $TMP/d | sed 's/^/        /'; rc=1
+fi
+added=$(grep '^> # Source:' $TMP/d | sed 's#.*/templates/##' | sort | tr '\n' ' ')
+if [ "$added" = "upiAppProjectApp.yaml upiAppset.yaml " ]; then
+  echo "  ok    added: $added"
+else
+  echo "  FAIL  added: '${added}' (expected upiAppProjectApp.yaml upiAppset.yaml)"; rc=1
+fi
+
+echo "UPI: must render (branch only)"
+for c in "operators ops-upi.yaml" "operators ops-upi-nover.yaml" "deploy dep-upi.yaml" "deploy dep-upi-nover.yaml"; do
+  set -- $c
+  out=$(render "$NEW" $1 -f $TMP/$2)
+  if ! echo "$out" | grep -q RENDER-FAILED && echo "$out" | grep -q 'namespace: openshift-gitops-upi'; then
+    echo "  ok    $1, ${2%.yaml}"
+  else
+    echo "  FAIL  $1, ${2%.yaml}: render error, or nothing in openshift-gitops-upi"
+    echo "$out" | grep '^Error' | head -3 | sed 's/^/        /'; rc=1
+  fi
+done
+
+rm -rf "$TMP"
+echo; [ $rc -eq 0 ] && echo "RESULT: PASS" || echo "RESULT: FAIL"
+exit $rc
 ```
+
+Expected output:
+
+```
+Existing destinations: must render byte-identically
+  ok    operators, MCE hub: identical to origin/main
+  ok    operators, hosted cluster: identical to origin/main
+  ok    deploy, MCE hub: identical to origin/main
+  ok    deploy, hosted cluster: identical to origin/main
+  ok    deploy, hosted cluster, all keys: identical to origin/main
+  ok    deploy, prod-hub: identical to origin/main
+  ok    deploy, prod-hub, all keys: identical to origin/main
+mces chart: only the two new objects may appear
+  ok    added: upiAppProjectApp.yaml upiAppset.yaml
+UPI: must render (branch only)
+  ok    operators, ops-upi
+  ok    operators, ops-upi-nover
+  ok    deploy, dep-upi
+  ok    deploy, dep-upi-nover
+
+RESULT: PASS
+```
+
+Any `FAIL` stops the MR:
+
+- **`differs from origin/main`** under "Existing destinations": a UPI guard
+  leaked into an existing render. The diff lines show where. Compare the file
+  with §4.
+- **`render error`**: a nil reached a template function, typically a
+  `ternary` on `.Values.upi`, or `.Values.upi` used without a guard.
+- **`existing mces output changed`**, or other files under `added:`: something
+  besides the two new files changed in `mces/templates/`.
+
+What it cannot see: which folders the generators discover, and anything in the
+sigs repos. Discovery is covered by the glob argument in §2. Sigs changes are
+covered by the review list in §6.2.
 
 ---
 
@@ -1034,15 +959,120 @@ What changes in `render_chain.py`:
 
 ### 6.1 `defaults/upi/README.md` (optional)
 
-Copy the mock's `sigs/redbull/defaults/upi/README.md` into each sigs repo that
-will have UPI clusters, replacing `redbull` with the team name. It is the
-working contract for the folder: rules, the structural opt-out, and the value
-precedence. It is a plain file, so no generator sees it.
+The working contract for the folder: rules and value precedence. It is a
+plain file, so no generator sees it. Do not copy the mock's copy: it also
+documents the structural opt-out (`exclusions.yaml`, rule 4, the XOR
+carve-out), which does not exist without Phase F. Use this version instead,
+with `<team>` replaced by the team name:
+
+````markdown
+# defaults/upi
+
+Chart folders in this directory are deployed to **every UPI cluster** of this
+team (<team>), on every site and env. A UPI cluster is a standalone OpenShift
+cluster: no MCE above it and no Argo of its own. This folder is the UPI mirror
+of [`defaults/hosted-clusters/`](../hosted-clusters/) (every hosted cluster),
+[`defaults/mces/`](../mces/) (every MCE hub) and [`defaults/hub/`](../hub/)
+(the prod-hub mgmt cluster).
+
+Wiring: the platform's `upiAppset` (on prod-hub's day2 Argo) creates one
+`<team>-<cluster>` app per folder under `sites/<site>/<env>/upi/`. That app
+hands the `operators` chart over to the **UPI Argo instance**
+(`openshift-gitops-upi`, on the same hub cluster), whose generator scans
+`defaults/upi/*` next to the cluster's own chart folders and feeds the **same
+ApplicationSet and template**. A chart therefore renders a byte-identical
+Application whether it sits here or in a specific cluster folder — moving it
+between the two is an in-place update, never a delete/recreate.
+
+## Layout
+
+```
+defaults/
+  upi/
+    <chart>/
+      <chart>.yaml            # deploy config (repourl, projectNamespace, syncPolicy, ...)
+      values.yaml             # helm values applied on every UPI cluster
+      values-<env>.yaml       # optional: overrides for one env (prod | prep | test)
+      values-<cluster>.yaml   # optional: overrides for one specific UPI cluster
+```
+
+## Registering a UPI cluster
+
+A UPI cluster exists for day2 when its folder exists:
+`sites/<site>/<env>/upi/<cluster>/`. Two things to know:
+
+- **The folder name is the cluster's name on the UPI Argo instance**
+  (`argocd cluster list` against `openshift-gitops-upi`). The leaf apps target
+  `destination.name: <cluster>` there. Name the folder after the existing
+  cluster secret, never the reverse.
+- **`version.yaml` in that folder is optional.** It holds `mastertag:
+  4.16.27-x86_64` and nothing else. With it, the cluster's charts pick up
+  `operators/<chart>/ocp-versions/<v>/` pins and carry a
+  `day2.gitops/ocp-version` label. Without it, the cluster is version-less
+  like prod-hub: pinned charts get the team default. day1 does not know UPI
+  clusters, so this is the one place a sigs repo declares a version, and a UPI
+  upgrade is one edit per team repo that declares it.
+
+There is **no day1 parity check** for UPI folders, so a stray folder under
+`upi/` becomes a phantom app. Nothing catches that offline: every MR that
+touches `upi/` is reviewed by hand.
+
+## Rules
+
+1. **XOR rule:** a chart lives EITHER here OR in a specific UPI cluster's
+   folder (`sites/<site>/<env>/upi/<cluster>/<chart>/`) — never both. A
+   violation produces two generator entries with the same Application name;
+   controller behavior for duplicates is undefined.
+2. **Per-scope overrides go in `values-<env>.yaml` / `values-<cluster>.yaml`
+   here** — do NOT create the chart under a specific cluster just to hold an
+   override file (that violates rule 1).
+3. **Every directory directly under this folder becomes an Application on
+   every UPI cluster.** Never create non-chart directories here. Plain files
+   are ignored by the directory generator and are safe — this README is a
+   plain file here for exactly that reason.
+4. **There is no per-cluster opt-out.** A chart here is deployed to every UPI
+   cluster of the team. A cluster that needs the chart to *behave* differently
+   gets a `values-<cluster>.yaml` here. A chart that some UPI cluster must not
+   have **at all** does not belong here: put it in the folders of the clusters
+   that need it instead.
+5. **`repourl` is all-lowercase** — that is the key `deployApp.yaml` reads.
+6. **Leave `targetRevision` out of the deploy config here if the chart should
+   follow per-OCP-version pins.** This file sits ABOVE the
+   `operators/<chart>/ocp-versions/<v>/` layer in the config stack, so a
+   `targetRevision` written here overrides every version pin silently.
+7. **Never let gitops-upi and day2 deploy the same chart to the same cluster.**
+   Both now run on the UPI Argo instance with the same `releaseName` and
+   namespace, so two Applications would fight over one release. Remove the
+   chart from gitops-upi first, then add it here or to the cluster folder.
+
+## Values precedence (lowest to highest)
+
+1. `operators/<chart>/values.yaml` — chart, team-wide
+2. `operators/<chart>/ocp-versions/<v>/values.yaml` — chart, per OCP version (only when the cluster has a `version.yaml`)
+3. `sites/<site>/values.yaml` — site-wide (shared with every kind of cluster at the site)
+4. `sites/<site>/<env>/values.yaml` — site + env (shared likewise)
+5. `defaults/upi/<chart>/values.yaml` — chart, every UPI cluster
+6. `defaults/upi/<chart>/values-<env>.yaml` — chart + env
+7. `defaults/upi/<chart>/values-<cluster>.yaml` — chart + cluster
+8. `sites/<site>/<env>/upi/values.yaml` — every UPI cluster at this site + env
+9. `sites/<site>/<env>/upi/<cluster>/values.yaml` — cluster-wide
+10. `.../<cluster>/<chart>/values.yaml` — per-cluster charts only (XOR rule)
+
+Layers 3 and 4 are shared with MCE hubs and hosted clusters at the same
+site/env on purpose: they hold site facts (registry, DNS, proxy) that every
+cluster there needs. Anything only UPI clusters should see goes in layers 5–9.
+
+Deploy config precedence: `operators/<chart>/<chart>.yaml` →
+`operators/<chart>/ocp-versions/<v>/<chart>.yaml` (versioned clusters only) →
+`defaults/upi/<chart>/<chart>.yaml` →
+`.../<cluster>/<chart>/<chart>.yaml` (per-cluster charts only).
+````
 
 The folder `defaults/upi/` itself works like `defaults/hosted-clusters/`:
 every chart folder in it deploys to every UPI cluster of the team, with
-`values-<env>.yaml` and `values-<cluster>.yaml` overrides and an optional
-`exclusions.yaml`.
+`values-<env>.yaml` and `values-<cluster>.yaml` overrides. There is no
+per-cluster opt-out: a chart that some UPI cluster must not have belongs in
+the folders of the clusters that need it, not here.
 
 ### 6.2 Onboarding one UPI cluster
 
@@ -1056,7 +1086,19 @@ every chart folder in it deploys to every UPI cluster of the team, with
    cluster (check 11).
 4. A folder with no content yet needs a `.gitkeep`: git cannot track an empty
    folder.
-5. Run the harness (§7.2) and read the `apps added` line.
+5. **Review the MR by hand.** Nothing checks a sigs change offline in the
+   air-gap, and every folder under `upi/` becomes an app:
+   - the path is exactly `sites/<site>/<env>/upi/<cluster>/`, and `<env>` is
+     `prod`, `prep` or `test`;
+   - `<cluster>` is in B's cluster secret list (check 9), is not `in-cluster`,
+     and is not the name of an MCE or hosted cluster of any team;
+   - `version.yaml`, if present, has exactly one key, `mastertag`, in the form
+     `4.16.27` or `4.16.27-x86_64` (§6.3);
+   - no chart is both in `defaults/upi/` and in the cluster folder: that emits
+     two apps with one name;
+   - no chart in the folder is still deployed to that cluster by gitops-upi
+     (check 11);
+   - the MR adds no other folder under `sites/*/*/upi/`.
 
 ### 6.3 `version.yaml` — optional
 
@@ -1071,7 +1113,9 @@ mastertag: 4.16.27-x86_64
 - **Without it:** the cluster is version-less like prod-hub. A chart pinned
   per version gets its team default from `operators/<chart>/<chart>.yaml`.
 - **`mastertag` and nothing else.** The file is loaded as a Helm value file,
-  so any other key becomes a chart value. The harness rejects it.
+  so any other key silently becomes a chart value. Nothing rejects it in the
+  air-gap: the §6.2 review is the check. A malformed tag is silent too: the
+  version-pin paths are built from it and simply match no folder.
 - **Hand-maintained, per team repo.** day1 does not know UPI clusters, so
   every sigs repo that has the cluster declares its own copy, and an upgrade is
   one edit in each. Create the new `ocp-versions/<v>/` layers first.
@@ -1104,59 +1148,55 @@ Deploy config: `operators/<c>/<c>.yaml` → `operators/<c>/ocp-versions/<v>/<c>.
 
 ### 7.1 After the platform MR (step b)
 
+**Before merging:** §5 prints `RESULT: PASS`, and the §10 greps match.
+
+**Optional live preview**, before merging, with the `argocd` CLI logged in to
+instance A. The app to diff is the one the `groups` ApplicationSet created for
+the team, which renders the `mces` chart (`argocd app list | grep <team>`; its
+path is `mces`):
+
 ```bash
-# "before" snapshots are the ones from check 2, taken with BOTH repos at main.
-python3 "$RENDER" snapshot --out /tmp/rv-after-<team> \
-    --group <team> --sigs <sigs> --platform <platform> --day1 <day1>
-python3 "$RENDER" compare /tmp/rv-before-<team> /tmp/rv-after-<team>
+argocd app diff <team> --revision <your-branch>
 ```
 
-Run the pair once per sigs repo. The mock printed:
+It must show exactly two new objects, the ApplicationSet `<team>-upi` and the
+Application `<team>-upi-app-project`, and nothing else. The operators and
+deploy changes do not show here: apps on the MCEs' Argo instances render
+those charts, and §5 covers them.
 
+**After merging**, per team:
+
+```bash
+oc get application <team>-upi-app-project -n openshift-gitops          # Synced / Healthy
+oc get appproject <team> -n openshift-gitops-upi                       # exists
+oc get applicationset <team>-upi -n gitops-<team>                      # exists
+oc get applications -n openshift-gitops-upi -l day2.gitops/team=<team> # nothing yet: no upi/ folder
 ```
-snapshot: 33 apps, 12 appset CRs -> /tmp/rv-before-redbull
-snapshot: 34 apps, 13 appset CRs -> /tmp/rv-after-redbull
-== compare /tmp/rv-before-redbull -> /tmp/rv-after-redbull ==
-apps: 33 -> 34
-  [info] apps added: ['prod-hub:redbull-upi-app-project']
-IDENTITY OK: names, destinations, releaseNames, syncPolicies and resolved value-file contents are unchanged.
-```
 
-Read it as three assertions:
-
-- **App count +1**, and the only added app is `prod-hub:<team>-upi-app-project`.
-- **No other INFO line.** Any `labels` or `valueFiles` line here means a guard
-  leaked into an existing render. Stop and diff the file against §4.
-- **`IDENTITY OK`.** A `render aborted` line means a nil reached a template
-  function. Stop.
-
-The `snapshot:` line also shows one more ApplicationSet per team:
-`<team>-upi`, with no apps.
+No existing day2 app, on A or on an MCE, should go OutOfSync because of this
+merge. Their templates render identically (§5), so an OutOfSync app there has
+another cause.
 
 ### 7.2 After the first UPI cluster folder (step d)
 
-The mock added `sites/site1/prod/upi/ocp4-dok-site1/` with a `version.yaml`
-and one chart, `cluster-roles`. Compared with the step-b snapshot:
+**Before merging:** the §6.2 review list. **After merging**, the chain runs:
 
-```
-snapshot: 34 apps, 13 appset CRs -> /tmp/rv-after-redbull
-snapshot: 37 apps, 14 appset CRs -> /tmp/rv-upi-redbull
-== compare /tmp/rv-after-redbull -> /tmp/rv-upi-redbull ==
-apps: 34 -> 37
-  [info] apps added: ['prod-hub-upi:redbull-ocp4-dok-site1-cluster-roles', 'prod-hub-upi:redbull-ocp4-dok-site1-cluster-roles-deploy', 'prod-hub:redbull-ocp4-dok-site1']
-IDENTITY OK: names, destinations, releaseNames, syncPolicies and resolved value-file contents are unchanged.
-```
+- on A, `<team>-upi` creates the wrapper `<team>-<cluster>` in `gitops-<team>`;
+- the wrapper writes the ApplicationSet `<team>-<cluster>-operators` into
+  `openshift-gitops-upi`;
+- on B, that ApplicationSet creates two apps per chart, `<team>-<cluster>-<chart>`
+  and its leaf `<team>-<cluster>-<chart>-deploy`, for every chart in the folder
+  and in `defaults/upi/`.
 
 Expect exactly **1 + 2 × (charts in the folder + charts in `defaults/upi/`)**
-added apps: the wrapper on `prod-hub`, and each chart's app and `-deploy` leaf
-on `prod-hub-upi`. The ApplicationSet count grows by one,
-`prod-hub-upi:<team>-<cluster>-operators`.
+new apps, and no change to any existing app. The mock's first folder,
+`sites/site1/prod/upi/ocp4-dok-site1/` with a `version.yaml` and one chart,
+`cluster-roles`, gave 3 (§7.4).
 
-In the mock snapshot the leaf
-`prod-hub-upi:redbull-ocp4-dok-site1-cluster-roles-deploy` has namespace
-`openshift-gitops-upi`, destination `ocp4-dok-site1`, `releaseName:
-cluster-roles`, labels with `role: upi` and `ocp-version: 4.16.27` and no
-`mce`, and this 10-layer stack:
+The leaf has namespace `openshift-gitops-upi`, destination `name: <cluster>`,
+`releaseName: <chart>`, labels with `role: upi` and no `mce`, and this value
+stack (`oc get application <team>-<cluster>-<chart>-deploy -n
+openshift-gitops-upi -o yaml`, `spec.sources[0].helm.valueFiles`). In the mock:
 
 ```
  1  $values/operators/cluster-roles/values.yaml
@@ -1171,6 +1211,9 @@ cluster-roles`, labels with `role: upi` and `ocp-version: 4.16.27` and no
 10  $values/sites/site1/prod/upi/ocp4-dok-site1/cluster-roles/values.yaml
 ```
 
+Without `version.yaml`, line 2 is absent and so is the
+`day2.gitops/ocp-version` label.
+
 ### 7.3 Live, after the first folder
 
 ```bash
@@ -1183,18 +1226,23 @@ oc get applications -n openshift-gitops-upi -l day2.gitops/cluster=<cluster>
 The chart's resources exist on the UPI cluster. That is the check nothing
 offline can make.
 
-### 7.4 Probes run in the mock (all reverted)
+### 7.4 Verification in the mock, with Phase F removed
 
-| Probe | Result |
+The mock's platform was copied and Phase F reversed in the copy (F.1–F.3 from
+`APPLY-EXCLUSIONS.md`, and no `exclusions.yaml` in the sigs copy): that is
+the air-gap's starting point. §4 was then applied from the blocks in this file
+and checked with the mock's render harness, which renders the whole chain
+offline. Probes were reverted after each run.
+
+| Step / probe | Result |
 |---|---|
-| a marker in `sites/site1/prod/upi/values.yaml` | one HARD: the leaf's sigs value sequence gains that file, and no other app changes |
-| `mastertag` flipped to `4.20.9-x86_64` | INFO only: `UPI version file` on the wrapper, labels and `valueFiles` on the two chart apps; `IDENTITY OK` |
-| `version.yaml` deleted | INFO only; the leaf stack drops to 9 layers and the `ocp-version` label is gone; `IDENTITY OK` |
-| a second key in `version.yaml` | check failure: "a UPI version file carries `mastertag` and nothing else" |
-| `defaults/upi/example-chart/` added | `apps added` ×2 on `prod-hub-upi` |
-| then `defaults/upi/exclusions.yaml` naming the cluster | `APPS DISAPPEARED` ×2, `exclusion control file` INFO on the wrapper |
-| the folder renamed to a hosted-cluster name | check failure: "reuses an MCE or hosted-cluster name" |
-| a hosted cluster's day1 file removed (scratch copy of day1) | unchanged behaviour: parity failure and `mastertag missing` render abort |
+| step b: §4 applied, no `upi/` folder | 35 → 36 apps: only `prod-hub:redbull-upi-app-project` added; every other app identical |
+| step d: + `sites/site1/prod/upi/ocp4-dok-site1/` (`version.yaml` + `cluster-roles`) | 36 → 39: the wrapper on prod-hub, `cluster-roles` and its `-deploy` leaf on B; every other app identical |
+| `version.yaml` deleted | no render error; the leaf stack drops to 9 layers and the `ocp-version` label goes |
+| `mastertag` flipped to `4.20.9-x86_64` | only the two chart apps' labels and version-pin paths change |
+| `defaults/upi/example-chart/` added | 2 apps added on B |
+| a marker in `sites/site1/prod/upi/values.yaml` | the leaf's value stack gains that file; no other app changes |
+| §5 on the same copy | `RESULT: PASS`. Two planted leaks, a wrong role label on hosted clusters and a `ternary` on `.Values.upi` in the deploy chart, each make it `FAIL` |
 
 ---
 
@@ -1236,17 +1284,18 @@ running workloads by name.
 ## 9. Docs
 
 The mock updated these alongside the templates. Carry them over if you keep
-copies in the air-gap:
+copies in the air-gap. The mock's copies also describe Phase F
+(`exclusions.yaml`, the XOR carve-out, runbook R10, the CI checks): leave
+those parts out.
 
 | File | Change |
 |---|---|
 | `sigs/<team>/README.md` | `upi/` in the tree, naming rules, "what makes a folder a cluster", the version exception, value stacks, `defaults/upi/` |
-| `sigs/<team>/defaults/upi/README.md` | new (§6.1) |
+| `sigs/<team>/defaults/upi/README.md` | new: the version in §6.1, not the mock's |
 | `sigs/<team>/defaults/{mces,hub,hosted-clusters}/README.md` | link to `defaults/upi/` |
 | `argocd-day2-platform/README.md` | four destination kinds, instance B, the two new templates, fork tables, values, labels, invariants |
 | `ARCHITECTURE.md` | the same, plus runbook R11 "Add a UPI cluster" and the UPI case in R8 |
 | `CHANGES.md` | a pointer to this guide |
-| `tools/ci/README.md` | §5 |
 
 ---
 
@@ -1265,11 +1314,13 @@ grep -c 'createNamespace: false' mces/templates/upiAppProjectApp.yaml
                                                                   # -> 1 (B gets the AppProject only, check 7)
 grep -c '\$day1' mces/templates/upiAppset.yaml                    # -> 0 (UPI never reads day1)
 grep -c '| ternary' operators/templates/operators.yaml deploy/templates/deployApp.yaml
-                                                                  # -> 1 and 0 ($exKey only; never on .Values.upi)
-grep -rn 'gitlab\|<GITLAB>' mces/ operators/ deploy/          # -> nothing (host replaced, §4)
+                                                                  # -> 0 and 0 (never on .Values.upi)
+grep -c 'exclu' operators/templates/operators.yaml mces/templates/upiAppset.yaml
+                                                                  # -> 0 and 0 (no Phase F code)
+grep -rn '<GITLAB>' mces/ operators/ deploy/                      # -> nothing (host replaced, §4)
 git diff --stat origin/main -- mces/templates/appProjectAppset.yaml mces/templates/mcesAppset.yaml clusters/ groups/
                                                                   # -> nothing
 ```
 
-Then the §7.1 compare for every team, and the §7.3 live check once the first
+Then §5 (`RESULT: PASS`), the §7.1 live checks after the merge, and the §7.3 live check once the first
 folder lands.
