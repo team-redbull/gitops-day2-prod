@@ -13,7 +13,11 @@ apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: {{ .Values.group }}-upi-app-project
-  namespace: gitops-{{ .Values.group }}
+  # openshift-gitops, not gitops-<group>: this app uses project `default`, and
+  # Argo admits an app outside its own namespace only if the project's
+  # spec.sourceNamespaces matches it. prod-hub's `default` has none. Same
+  # namespace and project as appProjectAppset's apps, which do the same job.
+  namespace: openshift-gitops
   annotations:
     argocd.argoproj.io/sync-wave: "-1"
   labels:
@@ -28,8 +32,11 @@ spec:
     targetRevision: main
     helm:
       ignoreMissingValueFiles: true
+      # AppProject only: gitops-<group> already exists on prod-hub and belongs
+      # to <group>-app-projects-in-cluster.
       values: |
         group: '{{ .Values.group }}'
+        createNamespace: false
   destination:
     name: in-cluster
     namespace: openshift-gitops-upi

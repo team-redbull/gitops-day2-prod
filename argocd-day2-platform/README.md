@@ -726,9 +726,9 @@ Notes:
 
 |  |  |
 |---|---|
-| **Object** | `Application <team>-upi-app-project`, namespace `gitops-<team>`, sync-wave −1, `project: default` |
+| **Object** | `Application <team>-upi-app-project`, namespace `openshift-gitops`, sync-wave −1, `project: default` |
 | **Runs on** | prod-hub's day2 Argo — **always rendered**, no generator |
-| **Renders** | the external chart `helm-charts/argo-appproject`, values `group: <team>` |
+| **Renders** | the external chart `helm-charts/argo-appproject`, values `group: <team>`, `createNamespace: false` |
 | **Destination** | `in-cluster`, namespace `openshift-gitops-upi` |
 | **Sync** | `automated: {selfHeal: true, prune: false}` |
 
@@ -736,8 +736,15 @@ Every app handed to the UPI Argo uses `project: <team>`, so the AppProject has
 to exist in `openshift-gitops-upi`. `appProjectAppset` (§6.3) cannot plant it:
 the UPI Argo is another Argo on the same cluster, not a cluster secret on
 prod-hub's day2 Argo. Helm cannot see whether a team has UPI folders, so every
-team gets this app and one inert AppProject in `openshift-gitops-upi`. The
-chart must create only namespaced objects there (`APPLY-UPI.md` check 7).
+team gets this app and one inert AppProject in `openshift-gitops-upi`.
+`createNamespace: false` keeps the chart's Namespace `gitops-<team>` out of
+this render: on prod-hub that Namespace belongs to
+`<team>-app-projects-in-cluster`. The chart places the AppProject in the
+release namespace (`APPLY-UPI.md` check 7).
+The app itself lives in `openshift-gitops`, not `gitops-<team>`: it uses
+project `default`, and Argo admits an app outside its own namespace only if
+the project's `spec.sourceNamespaces` matches it. prod-hub's `default` has
+none, so this app sits where `appProjectAppset`'s apps sit.
 
 ---
 
