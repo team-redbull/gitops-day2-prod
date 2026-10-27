@@ -384,8 +384,14 @@ render_chart(){ # -> $RES/hosts.tsv, hosts.json, rendered-objects.txt, BMH_NS, I
     sed 's/^/  /' "$tmp/err"; rm -rf "$tmp"; return 1
   fi
   # The client dry run turns the YAML into JSON; it needs the hub only for the
-  # BMH/NMStateConfig CRDs. The rendered BMC Secret stays in $tmp and is deleted.
-  if ! mce create --dry-run=client -o json -f "$tmp/r.yaml" 2> "$tmp/err" \
+  # BMH/NMStateConfig CRDs. It gives objects without a namespace the context's
+  # default namespace, so it runs on a private copy of the hub kubeconfig whose
+  # default is HELM_NS: the same place `helm install -n HELM_NS` puts them.
+  # The copy and the rendered BMC Secret stay in $tmp, which is deleted.
+  (umask 077; mce config view --flatten --minify > "$tmp/kc") \
+    && oc --kubeconfig="$tmp/kc" config set-context --current --namespace="$HELM_NS" >/dev/null \
+    || { echo "  cannot prepare a kubeconfig copy for the dry run"; rm -rf "$tmp"; return 1; }
+  if ! oc --kubeconfig="$tmp/kc" create --dry-run=client -o json -f "$tmp/r.yaml" 2> "$tmp/err" \
        | jq -c 'if .kind == "List" then .items[] else . end' > "$tmp/r.jsonl"; then
     sed 's/^/  /' "$tmp/err"; rm -rf "$tmp"; return 1
   fi
@@ -427,7 +433,7 @@ preflight_body(){
   (( NHOSTS > 0 )) || { echo "!! the chart renders no BareMetalHost"; return 1; }
   [[ $BMH_NS != *,* ]] || { echo "!! BMHs in several namespaces ($BMH_NS); the script expects one"; bad=1; }
   [[ -n $INFRAENV && $INFRAENV != *,* ]] || { echo "!! BMHs carry no single infraenvs.agent-install.openshift.io label ('$INFRAENV')"; bad=1; }
-  echo "BMH namespace: $BMH_NS   InfraEnv: $INFRAENV   hosts: $NHOSTS"
+  echo "BMH namespace: $BMH_NS (from the chart, or HELM_NS where the chart sets none)   InfraEnv: $INFRAENV   hosts: $NHOSTS"
 
   # Hub: a fresh install only. Re-applying an existing BMH strips what BMAC
   # wrote on it and makes BMO deprovision the host, so never adopt one.
